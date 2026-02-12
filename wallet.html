@@ -71,6 +71,7 @@
             <p>Track balances, top-ups, and payout movement.</p>
           </div>
           <div class="header-actions">
+            <button class="ghost" id="open-manual-validate-modal">Manual Transaction Validation</button>
             <button class="primary" id="open-topup-modal">Top up wallet</button>
           </div>
         </header>
@@ -193,7 +194,7 @@
 
           <div class="topup-summary">
             <div>
-              <span class="summary-label">Platform fee (10%)</span>
+              <span class="summary-label" id="topup-fee-label">Platform fee (10%)</span>
               <strong id="topup-fee">0</strong>
             </div>
             <div>
@@ -253,6 +254,47 @@
       </div>
     </div>
 
-    <script src="app.js?v=20260212-modalfix2"></script>
+    <div class="modal" id="manual-validate-modal" aria-hidden="true" hidden>
+      <div class="modal-backdrop"></div>
+      <div
+        class="modal-card modal-card-compact"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="manual-validate-title"
+      >
+        <div class="modal-header">
+          <div>
+            <span class="modal-kicker">Wallet validation</span>
+            <h2 id="manual-validate-title">Manual Transaction Validation</h2>
+          </div>
+          <button class="ghost small" type="button" data-close-manual>Close</button>
+        </div>
+
+        <form id="manual-validate-form">
+          <div class="form-grid">
+            <label>
+              Transaction Reference Number
+              <input
+                type="text"
+                id="manual-transaction-ref"
+                name="transactionReferenceNumber"
+                inputmode="numeric"
+                pattern="[0-9]{20}"
+                maxlength="20"
+                minlength="20"
+                placeholder="Enter 20-digit reference"
+                required
+              />
+            </label>
+          </div>
+          <div class="form-actions">
+            <button class="ghost" type="button" data-close-manual>Cancel</button>
+            <button class="primary" type="submit" id="manual-validate-submit">Validate</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <script src="app.js?v=20260212-manualvalidate"></script>
   </body>
 </html>

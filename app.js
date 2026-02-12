@@ -2392,6 +2392,7 @@ if (topupModal) {
   const amountInput = document.getElementById("topup-amount");
   const methodSelect = document.getElementById("topup-method");
   const phoneInput = document.getElementById("topup-phone");
+  const feeLabelEl = document.getElementById("topup-fee-label");
   const feeEl = document.getElementById("topup-fee");
   const totalEl = document.getElementById("topup-total");
   const creditEl = document.getElementById("topup-credit");
@@ -2408,9 +2409,18 @@ if (topupModal) {
   const topupResultTitle = document.getElementById("topup-result-title");
   const topupResultMessage = document.getElementById("topup-result-message");
   const topupResultCloseButtons = topupResultModal?.querySelectorAll("[data-close]") || [];
+  const manualValidateModal = document.getElementById("manual-validate-modal");
+  const openManualValidateButton = document.getElementById("open-manual-validate-modal");
+  const manualValidateForm = document.getElementById("manual-validate-form");
+  const manualValidateInput = document.getElementById("manual-transaction-ref");
+  const manualValidateSubmit = document.getElementById("manual-validate-submit");
+  const manualValidateCloseButtons =
+    manualValidateModal?.querySelectorAll("[data-close-manual]") || [];
   const submitButton = topupForm?.querySelector("button[type='submit']");
   let isSubmittingTopup = false;
+  let isSubmittingManualValidation = false;
   const phonePattern = /^250\d{9}$/;
+  const defaultPlatformFeePercentage = 10;
   const validatingPendingTransactions = new Set();
 
   const formatAmount = (value) => {
@@ -2421,12 +2431,30 @@ if (topupModal) {
     }).format(amount);
   };
 
+  const formatPercentage = (value) =>
+    new Intl.NumberFormat("en-US", {
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 2,
+    }).format(Number(value) || 0);
+
+  const getPlatformFeePercentage = () => {
+    const value = Number(currentUserProfile?.platform_fee_percentage);
+    if (!Number.isFinite(value)) return defaultPlatformFeePercentage;
+    if (value < 0) return 0;
+    if (value > 100) return 100;
+    return value;
+  };
+
   const updateSummary = () => {
     const rawAmount = Number(amountInput.value);
     const amount = Number.isFinite(rawAmount) ? rawAmount : 0;
-    const fee = amount * 0.1;
+    const feePercentage = getPlatformFeePercentage();
+    const fee = amount * (feePercentage / 100);
     const total = amount + fee;
 
+    if (feeLabelEl) {
+      feeLabelEl.textContent = `Platform fee (${formatPercentage(feePercentage)}%)`;
+    }
     feeEl.textContent = formatAmount(fee);
     totalEl.textContent = formatAmount(total);
     creditEl.textContent = formatAmount(amount);
@@ -2462,6 +2490,38 @@ if (topupModal) {
     topupResultModal.classList.remove("active");
     topupResultModal.setAttribute("aria-hidden", "true");
     topupResultModal.hidden = true;
+  };
+
+  const setManualValidationSubmitting = (isSubmitting) => {
+    isSubmittingManualValidation = isSubmitting;
+    if (manualValidateSubmit) {
+      manualValidateSubmit.disabled = isSubmitting;
+      manualValidateSubmit.textContent = isSubmitting ? "Validating..." : "Validate";
+    }
+    if (manualValidateInput) {
+      manualValidateInput.disabled = isSubmitting;
+    }
+    manualValidateCloseButtons.forEach((button) => {
+      button.disabled = isSubmitting;
+    });
+  };
+
+  const openManualValidationModal = () => {
+    if (!manualValidateModal) return;
+    manualValidateForm?.reset();
+    setManualValidationSubmitting(false);
+    manualValidateModal.hidden = false;
+    manualValidateModal.classList.add("active");
+    manualValidateModal.setAttribute("aria-hidden", "false");
+    manualValidateInput?.focus();
+  };
+
+  const closeManualValidationModal = (options = {}) => {
+    const { force = false } = options;
+    if (!manualValidateModal || (!force && isSubmittingManualValidation)) return;
+    manualValidateModal.classList.remove("active");
+    manualValidateModal.setAttribute("aria-hidden", "true");
+    manualValidateModal.hidden = true;
   };
 
   const renderWallet = (payload) => {
@@ -2634,6 +2694,15 @@ if (topupModal) {
     return parseApiResponse(response, "Unable to check transaction status.");
   };
 
+  const manualValidateTopup = async (transactionId) => {
+    const response = await fetch("/api/wallet/topup/manual-validate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ transaction_id: transactionId }),
+    });
+    return parseApiResponse(response, "Unable to validate the transaction manually.");
+  };
+
   const showValidationResult = (transactionId, statusPayload) => {
     const status = String(statusPayload?.status || "pending");
     const message = statusPayload?.message || "Transaction status retrieved.";
@@ -2674,9 +2743,14 @@ if (topupModal) {
   };
 
   openTopupButton?.addEventListener("click", openModal);
+  openManualValidateButton?.addEventListener("click", openManualValidationModal);
 
   closeButtons.forEach((button) => {
     button.addEventListener("click", () => closeModal());
+  });
+
+  manualValidateCloseButtons.forEach((button) => {
+    button.addEventListener("click", closeManualValidationModal);
   });
 
   topupResultCloseButtons.forEach((button) => {
@@ -2698,12 +2772,55 @@ if (topupModal) {
     if (event.key === "Escape" && topupResultModal?.classList.contains("active")) {
       closeResultModal();
     }
+    if (event.key === "Escape" && manualValidateModal?.classList.contains("active")) {
+      closeManualValidationModal();
+    }
   });
 
   topupModal.addEventListener("click", (event) => {
     if (event.target.classList.contains("modal-backdrop")) {
       event.preventDefault();
     }
+  });
+
+  manualValidateModal?.addEventListener("click", (event) => {
+    if (event.target.classList.contains("modal-backdrop")) {
+      closeManualValidationModal();
+    }
+  });
+
+  manualValidateInput?.addEventListener("input", () => {
+    const digitsOnly = (manualValidateInput.value || "").replace(/\D/g, "").slice(0, 20);
+    if (manualValidateInput.value !== digitsOnly) {
+      manualValidateInput.value = digitsOnly;
+    }
+  });
+
+  manualValidateForm?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (isSubmittingManualValidation) return;
+    const transactionId = String(manualValidateInput?.value || "").replace(/\D/g, "");
+    if (!/^\d{20}$/.test(transactionId)) {
+      window.alert("Transaction Reference Number must contain exactly 20 digits.");
+      return;
+    }
+
+    setManualValidationSubmitting(true);
+    manualValidateTopup(transactionId)
+      .then((statusPayload) => {
+        closeManualValidationModal({ force: true });
+        showValidationResult(transactionId, statusPayload);
+        loadWallet();
+      })
+      .catch((error) => {
+        openResultModal(
+          "Manual validation failed",
+          error.message || "Unable to validate the transaction right now."
+        );
+      })
+      .finally(() => {
+        setManualValidationSubmitting(false);
+      });
   });
 
   amountInput.addEventListener("input", updateSummary);
@@ -2793,6 +2910,7 @@ if (topupModal) {
   });
 
   updateSummary();
+  document.addEventListener("faranga-profile-updated", updateSummary);
   loadWallet();
 }
 
@@ -2838,6 +2956,14 @@ if (signupForm) {
     const confirm = signupForm.querySelector(
       "input[name='confirm_password']"
     )?.value;
+    if (password && password.length < 8) {
+      event.preventDefault();
+      if (messageEl) {
+        messageEl.textContent = "Password must be at least 8 characters.";
+        messageEl.hidden = false;
+      }
+      return;
+    }
     if (password !== confirm) {
       event.preventDefault();
       if (messageEl) {
@@ -2896,8 +3022,8 @@ if (passwordUpdateForm) {
       showFeedback("error", "New password and confirmation do not match.");
       return;
     }
-    if (newPassword.length < 6) {
-      showFeedback("error", "New password must be at least 6 characters.");
+    if (newPassword.length < 8) {
+      showFeedback("error", "New password must be at least 8 characters.");
       return;
     }
     if (newPassword === currentPassword) {
@@ -3010,6 +3136,7 @@ if (protectedPage) {
       const response = await fetch(accountUrl, { credentials: "same-origin" });
       const profile = await parseApiResponse(response, "Unable to load account.");
       currentUserProfile = profile;
+      document.dispatchEvent(new CustomEvent("faranga-profile-updated"));
       renderUserPanel(profile);
       const topupPhoneInput = document.getElementById("topup-phone");
       if (topupPhoneInput && profile?.phone) {

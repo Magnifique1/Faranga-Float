@@ -12,29 +12,99 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from datetime import date, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, unquote
+from urllib.parse import parse_qs, quote, unquote
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int, *, minimum: int | None = None) -> int:
+    raw = os.getenv(name)
+    value = default
+    if raw is not None:
+        try:
+            value = int(raw)
+        except ValueError:
+            value = default
+    if minimum is not None and value < minimum:
+        return minimum
+    return value
+
 
 ROOT = Path(__file__).resolve().parent
 UPLOAD_DIR = ROOT / "uploads"
 PHONE_REGEX = re.compile(r"^\+250\d{9}$")
 TOPUP_PHONE_REGEX = re.compile(r"^250\d{9}$")
+INTERNAL_REF_REGEX = re.compile(r"^\d{20}$")
 SESSION_COOKIE = "session_id"
 MONEY_QUANT = Decimal("0.01")
-SESSION_TIMEOUT_MINUTES = 5
-SESSION_TIMEOUT_DISABLED = True
+PLATFORM_FEE_PERCENTAGE_DEFAULT = Decimal("10.00")
+PLATFORM_FEE_PERCENTAGE_MIN = Decimal("0.00")
+PLATFORM_FEE_PERCENTAGE_MAX = Decimal("100.00")
+SESSION_TIMEOUT_MINUTES = _env_int("SESSION_TIMEOUT_MINUTES", 15, minimum=1)
+SESSION_TIMEOUT_DISABLED = _env_flag("SESSION_TIMEOUT_DISABLED", False)
+SESSION_COOKIE_SECURE = _env_flag("SESSION_COOKIE_SECURE", True)
+SESSION_COOKIE_SAMESITE = str(os.getenv("SESSION_COOKIE_SAMESITE", "Strict")).strip().capitalize()
+if SESSION_COOKIE_SAMESITE not in {"Strict", "Lax", "None"}:
+    SESSION_COOKIE_SAMESITE = "Strict"
+if SESSION_COOKIE_SAMESITE == "None" and not SESSION_COOKIE_SECURE:
+    SESSION_COOKIE_SAMESITE = "Strict"
+MAX_REQUEST_BODY_BYTES = _env_int("MAX_REQUEST_BODY_BYTES", 1_048_576, minimum=1024)
+PASSWORD_MIN_LENGTH = _env_int("PASSWORD_MIN_LENGTH", 8, minimum=6)
 
-MYSQL_HOST = "146.190.113.67"
-MYSQL_USER = "magnifique"
-MYSQL_PASSWORD = "msN7qyp9zbPn4g_LZ"
-MYSQL_DB = "faranga_float"
-MYSQL_CHARSET = "utf8mb4"
-MYSQL_COLLATION = "utf8mb4_unicode_ci"
+MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
+MYSQL_USER = os.getenv("MYSQL_USER", "root")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+MYSQL_DB = os.getenv("MYSQL_DB", "faranga_float")
+MYSQL_CHARSET = os.getenv("MYSQL_CHARSET", "utf8mb4")
+MYSQL_COLLATION = os.getenv("MYSQL_COLLATION", "utf8mb4_unicode_ci")
 MYSQL_SSL_MODE = os.getenv("MYSQL_SSL_MODE", "DISABLED")
-MYSQL_CONNECT_TIMEOUT = int(os.getenv("MYSQL_CONNECT_TIMEOUT", "5"))
-DB_SCHEMA_VERSION = "2026-02-12-bk-trans-init"
+MYSQL_CONNECT_TIMEOUT = _env_int("MYSQL_CONNECT_TIMEOUT", 5, minimum=1)
+MYSQL_ALLOW_EMPTY_PASSWORD = _env_flag("MYSQL_ALLOW_EMPTY_PASSWORD", False)
+DEFAULT_ADMIN_EMAIL = os.getenv("DEFAULT_ADMIN_EMAIL", "admin@bulkartime.local").strip().lower()
+DEFAULT_ADMIN_PASSWORD = os.getenv("DEFAULT_ADMIN_PASSWORD")
+ENABLE_DEFAULT_ADMIN_SEED = _env_flag("ENABLE_DEFAULT_ADMIN_SEED", False)
+PAYMENT_GATEWAY_BASE_URL = os.getenv(
+    "PAYMENT_GATEWAY_BASE_URL",
+    "https://bk-api.magiquetechnologies.tech/api",
+).rstrip("/")
+PAYMENT_GATEWAY_VERIFY_SSL = _env_flag("PAYMENT_GATEWAY_VERIFY_SSL", True)
+PAYMENT_GATEWAY_TIMEOUT_SECONDS = _env_int("PAYMENT_GATEWAY_TIMEOUT_SECONDS", 20, minimum=1)
+LOGIN_MAX_ATTEMPTS = _env_int("LOGIN_MAX_ATTEMPTS", 5, minimum=1)
+LOGIN_ATTEMPT_WINDOW_SECONDS = _env_int("LOGIN_ATTEMPT_WINDOW_SECONDS", 300, minimum=30)
+LOGIN_BLOCK_SECONDS = _env_int("LOGIN_BLOCK_SECONDS", 900, minimum=60)
+ALLOWED_UPLOAD_EXTENSIONS = {
+    ".pdf",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".webp",
+    ".doc",
+    ".docx",
+}
+DB_SCHEMA_VERSION = "2026-02-12-status-reconcile-user-platform-fee"
 DB_INIT_MARKER = Path(os.getenv("DB_INIT_MARKER_PATH", f"/tmp/{MYSQL_DB}_db_schema_version"))
+LOGIN_FAILURE_TRACKER: dict[str, list[float]] = {}
+LOGIN_BLOCKED_UNTIL: dict[str, float] = {}
+PUBLIC_STATIC_FILES = {
+    "index.html",
+    "login.html",
+    "signup.html",
+    "wallet.html",
+    "settings.html",
+    "airtime-recipients.html",
+    "airtime-schedules.html",
+    "funds-recipients.html",
+    "funds-schedules.html",
+    "styles.css",
+    "app.js",
+}
 REQUIRED_TABLES = (
     "users",
     "sessions",
@@ -52,13 +122,20 @@ REQUIRED_TABLES = (
 REQUIRED_COLUMNS = (
     ("airtime_schedules", "as_total_recipients"),
     ("as_recipients", "recipient_id"),
+    ("users", "platform_fee_percentage"),
     ("transactions", "trans_ref_type"),
     ("transactions", "platform_fee"),
+    ("transactions", "platform_fee_percentage"),
+    ("transactions", "updated_at"),
     ("bk_trans_init", "internal_transaction_ref_number"),
 )
 
 
 class MySQLError(Exception):
+    pass
+
+
+class RequestTooLargeError(Exception):
     pass
 
 
@@ -100,6 +177,16 @@ def money_to_float(value: Decimal) -> float:
     return float(value.quantize(MONEY_QUANT, rounding=ROUND_HALF_UP))
 
 
+def payment_gateway_url(path: str) -> str:
+    return f"{PAYMENT_GATEWAY_BASE_URL}/{path.lstrip('/')}"
+
+
+def payment_gateway_ssl_context() -> ssl.SSLContext:
+    if PAYMENT_GATEWAY_VERIFY_SSL:
+        return ssl.create_default_context()
+    return ssl._create_unverified_context()
+
+
 def _sql_literal(value: object) -> str:
     if value is None:
         return "NULL"
@@ -130,6 +217,8 @@ def _format_query(query: str, params: tuple | list | None) -> str:
 
 
 def _run_mysql(sql: str, *, use_db: bool = True, with_headers: bool = True) -> str:
+    if not MYSQL_PASSWORD and not MYSQL_ALLOW_EMPTY_PASSWORD:
+        raise MySQLError("MYSQL_PASSWORD is not configured.")
     session_sql = (
         f"SET NAMES {MYSQL_CHARSET} COLLATE {MYSQL_COLLATION}; "
         f"SET collation_connection = '{MYSQL_COLLATION}'; "
@@ -278,6 +367,7 @@ def init_db() -> None:
             name VARCHAR(255) NULL,
             email VARCHAR(255) NOT NULL,
             phone VARCHAR(20) NULL,
+            platform_fee_percentage DECIMAL(5,2) NOT NULL DEFAULT 10.00,
             national_id_path VARCHAR(500) NULL,
             business_name VARCHAR(255) NULL,
             business_email VARCHAR(255) NULL,
@@ -467,6 +557,23 @@ def init_db() -> None:
             """
         )
 
+    users_platform_fee_percentage_column = select_one(
+        """
+        SELECT COLUMN_NAME
+        FROM information_schema.columns
+        WHERE table_schema = ? AND table_name = 'users' AND column_name = 'platform_fee_percentage'
+        """,
+        (MYSQL_DB,),
+    )
+    if users_platform_fee_percentage_column is None:
+        execute(
+            """
+            ALTER TABLE users
+            ADD COLUMN platform_fee_percentage DECIMAL(5,2) NOT NULL DEFAULT 10.00
+            AFTER phone
+            """
+        )
+
     execute(
         """
         CREATE TABLE IF NOT EXISTS transactions (
@@ -475,10 +582,13 @@ def init_db() -> None:
             trans_type ENUM('in','out') NOT NULL,
             trans_amount DECIMAL(14,2) NOT NULL,
             platform_fee DECIMAL(14,2) NOT NULL DEFAULT 0.00,
+            platform_fee_percentage DECIMAL(5,2) NOT NULL DEFAULT 0.00,
             trans_ref VARCHAR(255) NOT NULL,
             trans_ref_type ENUM('airtime','funds','top-up') NOT NULL DEFAULT 'top-up',
             created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL,
             INDEX transactions_user_idx (user_id),
+            UNIQUE KEY transactions_trans_ref_uidx (trans_ref),
             FOREIGN KEY (user_id) REFERENCES users(id)
         ) ENGINE=InnoDB
         """
@@ -572,6 +682,103 @@ def init_db() -> None:
             """
         )
 
+    platform_fee_percentage_column = select_one(
+        """
+        SELECT COLUMN_NAME
+        FROM information_schema.columns
+        WHERE table_schema = ? AND table_name = 'transactions' AND column_name = 'platform_fee_percentage'
+        """,
+        (MYSQL_DB,),
+    )
+    if platform_fee_percentage_column is None:
+        execute(
+            """
+            ALTER TABLE transactions
+            ADD COLUMN platform_fee_percentage DECIMAL(5,2) NOT NULL DEFAULT 0.00
+            AFTER platform_fee
+            """
+        )
+        execute(
+            """
+            UPDATE transactions
+            SET platform_fee_percentage = CASE
+              WHEN trans_type = 'in' AND trans_ref_type = 'top-up' AND trans_amount > 0
+                THEN ROUND((platform_fee / trans_amount) * 100, 2)
+              ELSE 0.00
+            END
+            """
+        )
+
+    updated_at_column = select_one(
+        """
+        SELECT COLUMN_NAME
+        FROM information_schema.columns
+        WHERE table_schema = ? AND table_name = 'transactions' AND column_name = 'updated_at'
+        """,
+        (MYSQL_DB,),
+    )
+    if updated_at_column is None:
+        execute(
+            """
+            ALTER TABLE transactions
+            ADD COLUMN updated_at DATETIME NULL
+            AFTER created_at
+            """
+        )
+        execute(
+            """
+            UPDATE transactions
+            SET updated_at = created_at
+            WHERE updated_at IS NULL
+            """
+        )
+        execute(
+            """
+            ALTER TABLE transactions
+            MODIFY COLUMN updated_at DATETIME NOT NULL
+            """
+        )
+
+    execute(
+        """
+        UPDATE transactions
+        SET trans_ref = CONCAT('airtime-', trans_ref)
+        WHERE trans_ref_type = 'airtime' AND trans_ref NOT LIKE 'airtime-%'
+        """
+    )
+    execute(
+        """
+        UPDATE transactions
+        SET trans_ref = CONCAT('funds-', trans_ref)
+        WHERE trans_ref_type = 'funds' AND trans_ref NOT LIKE 'funds-%'
+        """
+    )
+    execute(
+        """
+        UPDATE transactions t1
+        JOIN transactions t2
+          ON t1.trans_ref = t2.trans_ref
+         AND t1.id > t2.id
+        SET t1.trans_ref = CONCAT(t1.trans_ref, '-legacy-', t1.id)
+        """
+    )
+    trans_ref_unique_index = select_one(
+        """
+        SELECT INDEX_NAME
+        FROM information_schema.statistics
+        WHERE table_schema = ? AND table_name = 'transactions' AND index_name = 'transactions_trans_ref_uidx'
+        LIMIT 1
+        """,
+        (MYSQL_DB,),
+    )
+    if trans_ref_unique_index is None:
+        execute(
+            """
+            ALTER TABLE transactions
+            ADD UNIQUE KEY transactions_trans_ref_uidx (trans_ref)
+            """
+        )
+
     execute(
         """
         CREATE TABLE IF NOT EXISTS wallet_balance (
@@ -585,26 +792,37 @@ def init_db() -> None:
     )
 
     now = utc_now_str()
-    admin = select_one("SELECT id FROM users WHERE email = ?", ("admin@bulkartime.local",))
+    admin = select_one("SELECT id FROM users WHERE email = ?", (DEFAULT_ADMIN_EMAIL,))
     if admin is None:
-        password_hash, password_salt = hash_password("admin123")
-        execute(
-            """
-            INSERT INTO users
-              (account_type, name, email, phone, password_hash, password_salt, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                "business",
-                "Admin",
-                "admin@bulkartime.local",
-                "+250700000000",
-                password_hash,
-                password_salt,
-                now,
-                now,
-            ),
-        )
+        seed_password = DEFAULT_ADMIN_PASSWORD
+        if not seed_password and ENABLE_DEFAULT_ADMIN_SEED:
+            seed_password = secrets.token_urlsafe(24)
+            print("Generated temporary admin password from ENABLE_DEFAULT_ADMIN_SEED.")
+            print(f"Admin email: {DEFAULT_ADMIN_EMAIL}")
+            print(f"Admin password: {seed_password}")
+        if not seed_password:
+            print(
+                "Skipping default admin creation. Set DEFAULT_ADMIN_PASSWORD or ENABLE_DEFAULT_ADMIN_SEED=1."
+            )
+        else:
+            password_hash, password_salt = hash_password(seed_password)
+            execute(
+                """
+                INSERT INTO users
+                  (account_type, name, email, phone, password_hash, password_salt, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "business",
+                    "Admin",
+                    DEFAULT_ADMIN_EMAIL,
+                    "+250700000000",
+                    password_hash,
+                    password_salt,
+                    now,
+                    now,
+                ),
+            )
 
     execute(
         """
@@ -635,13 +853,75 @@ class AdminHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args) -> None:  # noqa: A003
         return
 
+    def _add_security_headers(self) -> None:
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+        self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+        if SESSION_COOKIE_SECURE:
+            self.send_header("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+
+    def _build_session_cookie(self, value: str, *, delete: bool = False) -> str:
+        parts = [
+            f"{SESSION_COOKIE}={value}",
+            "HttpOnly",
+            "Path=/",
+            f"SameSite={SESSION_COOKIE_SAMESITE}",
+        ]
+        if SESSION_COOKIE_SECURE:
+            parts.append("Secure")
+        if delete:
+            parts.append("Max-Age=0")
+        return "; ".join(parts)
+
+    def _read_content_length(self) -> int:
+        raw = self.headers.get("Content-Length", "0")
+        try:
+            length = int(raw)
+        except (TypeError, ValueError):
+            return 0
+        if length < 0:
+            return 0
+        if length > MAX_REQUEST_BODY_BYTES:
+            raise RequestTooLargeError("Request body too large.")
+        return length
+
+    def _login_rate_limit_key(self, email: str) -> str:
+        client_ip = self.client_address[0] if self.client_address else "unknown"
+        return f"{client_ip}:{email.lower()}"
+
+    def _login_block_remaining_seconds(self, key: str) -> int:
+        now_ts = utc_now().timestamp()
+        blocked_until = LOGIN_BLOCKED_UNTIL.get(key, 0.0)
+        if blocked_until <= now_ts:
+            LOGIN_BLOCKED_UNTIL.pop(key, None)
+            return 0
+        return int(blocked_until - now_ts)
+
+    def _register_login_failure(self, key: str) -> None:
+        now_ts = utc_now().timestamp()
+        window_start = now_ts - LOGIN_ATTEMPT_WINDOW_SECONDS
+        attempts = [ts for ts in LOGIN_FAILURE_TRACKER.get(key, []) if ts >= window_start]
+        attempts.append(now_ts)
+        LOGIN_FAILURE_TRACKER[key] = attempts
+        if len(attempts) >= LOGIN_MAX_ATTEMPTS:
+            LOGIN_BLOCKED_UNTIL[key] = now_ts + LOGIN_BLOCK_SECONDS
+            LOGIN_FAILURE_TRACKER[key] = []
+
+    def _clear_login_failures(self, key: str) -> None:
+        LOGIN_FAILURE_TRACKER.pop(key, None)
+        LOGIN_BLOCKED_UNTIL.pop(key, None)
+
     def _send_json(self, status: int, payload: object, headers: dict | None = None) -> None:
         body = json.dumps(payload).encode("utf-8")
         self.send_response(status)
         if headers:
             for key, value in headers.items():
                 self.send_header(key, value)
+        self._add_security_headers()
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -654,6 +934,7 @@ class AdminHandler(BaseHTTPRequestHandler):
         if headers:
             for key, value in headers.items():
                 self.send_header(key, value)
+        self._add_security_headers()
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -664,11 +945,12 @@ class AdminHandler(BaseHTTPRequestHandler):
         if headers:
             for key, value in headers.items():
                 self.send_header(key, value)
+        self._add_security_headers()
         self.send_header("Location", location)
         self.end_headers()
 
     def _read_json(self) -> dict:
-        length = int(self.headers.get("Content-Length", "0"))
+        length = self._read_content_length()
         if length == 0:
             return {}
         raw = self.rfile.read(length)
@@ -686,7 +968,7 @@ class AdminHandler(BaseHTTPRequestHandler):
             if not boundary_token:
                 return {}, {}
 
-            length = int(self.headers.get("Content-Length", "0"))
+            length = self._read_content_length()
             body = self.rfile.read(length)
             fields: dict[str, str] = {}
             files: dict[str, dict] = {}
@@ -736,7 +1018,7 @@ class AdminHandler(BaseHTTPRequestHandler):
 
             return fields, files
 
-        length = int(self.headers.get("Content-Length", "0"))
+        length = self._read_content_length()
         raw = self.rfile.read(length).decode("utf-8")
         parsed = parse_qs(raw)
         fields = {key: values[0] if values else "" for key, values in parsed.items()}
@@ -744,7 +1026,9 @@ class AdminHandler(BaseHTTPRequestHandler):
 
     def _save_upload(self, file_item: dict) -> str:
         filename = os.path.basename(file_item.get("filename") or "")
-        ext = Path(filename).suffix if filename else ""
+        ext = Path(filename).suffix.lower() if filename else ""
+        if ext not in ALLOWED_UPLOAD_EXTENSIONS:
+            raise ValueError("Invalid file type. Allowed: pdf, png, jpg, jpeg, webp, doc, docx.")
         safe_name = f"{secrets.token_hex(12)}{ext}"
         target = UPLOAD_DIR / safe_name
         with target.open("wb") as handle:
@@ -885,6 +1169,7 @@ class AdminHandler(BaseHTTPRequestHandler):
         amount: Decimal,
         trans_ref: str,
         platform_fee: Decimal = Decimal("0.00"),
+        platform_fee_percentage: Decimal = Decimal("0.00"),
         trans_ref_type: str = "top-up",
     ) -> tuple[int, Decimal]:
         normalized_amount = amount.quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
@@ -893,6 +1178,10 @@ class AdminHandler(BaseHTTPRequestHandler):
         normalized_fee = platform_fee.quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
         if normalized_fee < 0:
             raise ValueError("Platform fee cannot be negative.")
+        normalized_fee_percentage = self._normalize_platform_fee_percentage(
+            platform_fee_percentage,
+            default=Decimal("0.00"),
+        )
 
         self._ensure_wallet_row(user_id)
         now = utc_now_str()
@@ -919,10 +1208,30 @@ class AdminHandler(BaseHTTPRequestHandler):
         _, trans_id = execute(
             """
             INSERT INTO transactions
-              (user_id, trans_type, trans_amount, platform_fee, trans_ref, trans_ref_type, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+              (
+                user_id,
+                trans_type,
+                trans_amount,
+                platform_fee,
+                platform_fee_percentage,
+                trans_ref,
+                trans_ref_type,
+                created_at,
+                updated_at
+              )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (user_id, trans_type, normalized_amount, normalized_fee, trans_ref, trans_ref_type, now),
+            (
+                user_id,
+                trans_type,
+                normalized_amount,
+                normalized_fee,
+                normalized_fee_percentage,
+                trans_ref,
+                trans_ref_type,
+                now,
+                now,
+            ),
         )
         balance = self._get_wallet_balance_amount(user_id)
         return trans_id, balance
@@ -996,41 +1305,759 @@ class AdminHandler(BaseHTTPRequestHandler):
             (status, utc_now_str(), user_id, transaction_id),
         )
 
-    def _derive_topup_status(self, gateway_response: dict) -> tuple[str, str]:
-        data_wrapper = gateway_response.get("data")
-        if not isinstance(data_wrapper, dict):
-            data_wrapper = {}
-        data_payload = data_wrapper.get("data")
-        if not isinstance(data_payload, dict):
-            data_payload = {}
+    def _bool_from_value(self, value: object) -> bool | None:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if not isinstance(value, str):
+            return None
+        text = value.strip().lower()
+        if text in {"1", "true", "yes", "ok", "success", "successful"}:
+            return True
+        if text in {"0", "false", "no", "failed", "failure", "error"}:
+            return False
+        return None
 
-        raw_status = str(data_payload.get("status") or data_wrapper.get("status") or "").strip().lower()
-        gateway_message = str(
-            gateway_response.get("message")
-            or data_wrapper.get("message")
-            or data_payload.get("message")
-            or ""
-        ).strip()
+    def _parse_json_container(self, value: object) -> object | None:
+        if not isinstance(value, str):
+            return None
+        text = value.strip()
+        if not text or text[0] not in "{[":
+            return None
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return None
+        if isinstance(parsed, (dict, list)):
+            return parsed
+        return None
+
+    def _extract_gateway_response_payload(self, gateway_response: dict) -> object | None:
+        candidates: list[object] = []
+
+        direct_response = gateway_response.get("response")
+        if direct_response is not None:
+            candidates.append(direct_response)
+
+        data_wrapper = gateway_response.get("data")
+        if isinstance(data_wrapper, dict):
+            if data_wrapper.get("response") is not None:
+                candidates.append(data_wrapper.get("response"))
+            data_payload = data_wrapper.get("data")
+            if isinstance(data_payload, dict) and data_payload.get("response") is not None:
+                candidates.append(data_payload.get("response"))
+
+        discovered = self._find_gateway_value(gateway_response, {"response"})
+        if discovered is not None:
+            candidates.append(discovered)
+
+        for candidate in candidates:
+            if isinstance(candidate, (dict, list)):
+                return candidate
+            parsed = self._parse_json_container(candidate)
+            if parsed is not None:
+                return parsed
+        return None
+
+    def _derive_topup_status(self, gateway_response: dict) -> tuple[str, str]:
+        response_payload = self._extract_gateway_response_payload(gateway_response)
+        status_source = response_payload if response_payload is not None else gateway_response
+
+        status_value = self._find_gateway_value(
+            status_source,
+            {"status", "transaction_status", "payment_status"},
+        )
+        raw_status = str(status_value or "").strip().lower()
+        message_value = self._find_gateway_value(
+            status_source,
+            {"message", "status_message", "description"},
+        )
+        if message_value in (None, ""):
+            message_value = self._find_gateway_value(
+                gateway_response,
+                {"message", "status_message", "description"},
+            )
+        reason_value = self._find_gateway_value(
+            status_source,
+            {"reason", "error", "error_message"},
+        )
+        if reason_value in (None, ""):
+            reason_value = self._find_gateway_value(
+                gateway_response,
+                {"reason", "error", "error_message"},
+            )
+
+        gateway_message = str(message_value or gateway_response.get("message") or "").strip()
+        reason = str(reason_value or "").strip()
+        if reason and reason.lower() not in gateway_message.lower():
+            gateway_message = f"{gateway_message}. {reason}".strip(". ").strip()
         gateway_message_lc = gateway_message.lower()
 
         if raw_status:
-            if any(token in raw_status for token in ("fail", "declin", "error")):
+            if any(token in raw_status for token in ("fail", "declin", "error", "cancel")):
                 return "failed", gateway_message or "Transaction Failed"
             if any(token in raw_status for token in ("success", "complet")):
                 return "success", gateway_message or "Transaction Successful"
             if any(token in raw_status for token in ("pending", "process", "initiat")):
                 return "pending", gateway_message or "Transaction Pending"
 
-        if "failed" in gateway_message_lc:
-            return "failed", gateway_message
-        if "successful" in gateway_message_lc or "success" in gateway_message_lc:
-            return "success", gateway_message
-        if "pending" in gateway_message_lc:
-            return "pending", gateway_message
-
-        if gateway_response.get("success"):
+        if any(token in gateway_message_lc for token in ("failed", "declined", "error", "cancelled")):
+            return "failed", gateway_message or "Transaction Failed"
+        if any(token in gateway_message_lc for token in ("successful", "success", "completed")):
             return "success", gateway_message or "Transaction Successful"
+        if "pending" in gateway_message_lc:
+            return "pending", gateway_message or "Transaction Pending"
+
+        success_flag = self._bool_from_value(
+            self._find_gateway_value(status_source, {"success", "is_success", "ok"})
+        )
+        if success_flag is None:
+            success_flag = self._bool_from_value(
+                self._find_gateway_value(gateway_response, {"success", "is_success", "ok"})
+            )
+        if success_flag is True:
+            return "success", gateway_message or "Transaction Successful"
+        if success_flag is False:
+            return "failed", gateway_message or "Transaction Failed"
+
         return "pending", gateway_message or "Transaction Pending"
+
+    def _safe_decimal(self, value: object) -> Decimal | None:
+        if value is None:
+            return None
+        text = str(value).strip().replace(",", "")
+        if not text:
+            return None
+        try:
+            return Decimal(text).quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
+        except (InvalidOperation, ValueError, TypeError):
+            return None
+
+    def _normalize_platform_fee_percentage(
+        self,
+        value: object,
+        *,
+        default: Decimal = PLATFORM_FEE_PERCENTAGE_DEFAULT,
+    ) -> Decimal:
+        parsed = self._safe_decimal(value)
+        if parsed is None:
+            parsed = default.quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
+        if parsed < PLATFORM_FEE_PERCENTAGE_MIN:
+            return PLATFORM_FEE_PERCENTAGE_MIN
+        if parsed > PLATFORM_FEE_PERCENTAGE_MAX:
+            return PLATFORM_FEE_PERCENTAGE_MAX
+        return parsed.quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
+
+    def _get_user_platform_fee_percentage(self, user_id: int) -> Decimal:
+        row = select_one(
+            "SELECT platform_fee_percentage FROM users WHERE id = ?",
+            (user_id,),
+        )
+        return self._normalize_platform_fee_percentage((row or {}).get("platform_fee_percentage"))
+
+    def _percentage_to_fee(self, amount: Decimal, percentage: Decimal) -> Decimal:
+        normalized_amount = amount.quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
+        normalized_percentage = self._normalize_platform_fee_percentage(percentage)
+        return ((normalized_amount * normalized_percentage) / Decimal("100")).quantize(
+            MONEY_QUANT, rounding=ROUND_HALF_UP
+        )
+
+    def _infer_platform_fee_percentage(
+        self,
+        *,
+        amount: Decimal,
+        platform_fee: Decimal,
+        fallback: Decimal = PLATFORM_FEE_PERCENTAGE_DEFAULT,
+    ) -> Decimal:
+        normalized_amount = amount.quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
+        normalized_fee = platform_fee.quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
+        fallback_percentage = self._normalize_platform_fee_percentage(fallback)
+
+        if normalized_amount <= 0:
+            return fallback_percentage
+        if normalized_fee <= 0:
+            return Decimal("0.00")
+
+        inferred = ((normalized_fee * Decimal("100")) / normalized_amount).quantize(
+            MONEY_QUANT, rounding=ROUND_HALF_UP
+        )
+        return self._normalize_platform_fee_percentage(inferred, default=fallback_percentage)
+
+    def _find_gateway_value(self, payload: object, keys: set[str]) -> object | None:
+        normalized_keys = {str(key).lower() for key in keys}
+        queue: list[object] = [payload]
+        seen_containers: set[int] = set()
+        while queue:
+            current = queue.pop(0)
+            if isinstance(current, (dict, list)):
+                current_id = id(current)
+                if current_id in seen_containers:
+                    continue
+                seen_containers.add(current_id)
+
+            if isinstance(current, dict):
+                for key, value in current.items():
+                    key_lc = str(key).lower()
+                    if key_lc in normalized_keys and value not in (None, ""):
+                        return value
+                    if isinstance(value, (dict, list)):
+                        queue.append(value)
+                    elif isinstance(value, str):
+                        parsed = self._parse_json_container(value)
+                        if parsed is not None:
+                            queue.append(parsed)
+            elif isinstance(current, list):
+                for item in current:
+                    if isinstance(item, (dict, list)):
+                        queue.append(item)
+                    elif isinstance(item, str):
+                        parsed = self._parse_json_container(item)
+                        if parsed is not None:
+                            queue.append(parsed)
+            elif isinstance(current, str):
+                parsed = self._parse_json_container(current)
+                if parsed is not None:
+                    queue.append(parsed)
+        return None
+
+    def _extract_gateway_amounts(self, gateway_response: dict) -> tuple[Decimal, Decimal, Decimal]:
+        amount_value = self._find_gateway_value(
+            gateway_response,
+            {
+                "amount",
+                "credited_amount",
+                "net_amount",
+                "wallet_amount",
+                "wallet_credit",
+                "transaction_amount",
+                "credited",
+                "creditedamount",
+            },
+        )
+        fee_value = self._find_gateway_value(
+            gateway_response,
+            {"platform_fee", "fee", "charges", "charge_fee", "service_fee", "processing_fee"},
+        )
+        total_value = self._find_gateway_value(
+            gateway_response,
+            {
+                "total_charge",
+                "charge_amount",
+                "paid_amount",
+                "gross_amount",
+                "charged_amount",
+                "debit_amount",
+                "amount",
+            },
+        )
+
+        amount = self._safe_decimal(amount_value) or Decimal("0.00")
+        platform_fee = self._safe_decimal(fee_value) or Decimal("0.00")
+        total_charge = self._safe_decimal(total_value) or Decimal("0.00")
+
+        if platform_fee < 0:
+            platform_fee = Decimal("0.00")
+        if total_charge <= 0:
+            total_charge = (amount + platform_fee).quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
+        if amount <= 0:
+            computed_amount = (total_charge - platform_fee).quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
+            if computed_amount > 0:
+                amount = computed_amount
+            elif total_charge > 0:
+                amount = total_charge
+
+        return (
+            amount.quantize(MONEY_QUANT, rounding=ROUND_HALF_UP),
+            platform_fee.quantize(MONEY_QUANT, rounding=ROUND_HALF_UP),
+            total_charge.quantize(MONEY_QUANT, rounding=ROUND_HALF_UP),
+        )
+
+    def _normalize_topup_amounts(
+        self,
+        *,
+        amount: Decimal,
+        platform_fee: Decimal,
+        total_charge: Decimal,
+        fallback_amount: Decimal | None = None,
+        fallback_platform_fee: Decimal | None = None,
+    ) -> tuple[Decimal, Decimal, Decimal]:
+        normalized_amount = amount.quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
+        normalized_fee = platform_fee.quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
+        normalized_total = total_charge.quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
+
+        if normalized_amount <= 0 and fallback_amount is not None and fallback_amount > 0:
+            normalized_amount = fallback_amount.quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
+        if normalized_fee <= 0 and fallback_platform_fee is not None and fallback_platform_fee >= 0:
+            normalized_fee = fallback_platform_fee.quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
+        if normalized_fee < 0:
+            normalized_fee = Decimal("0.00")
+        if normalized_total <= 0:
+            normalized_total = (normalized_amount + normalized_fee).quantize(
+                MONEY_QUANT, rounding=ROUND_HALF_UP
+            )
+        if normalized_amount <= 0:
+            computed_amount = (normalized_total - normalized_fee).quantize(
+                MONEY_QUANT, rounding=ROUND_HALF_UP
+            )
+            if computed_amount > 0:
+                normalized_amount = computed_amount
+            elif normalized_total > 0:
+                normalized_amount = normalized_total
+        if normalized_total <= 0:
+            normalized_total = (normalized_amount + normalized_fee).quantize(
+                MONEY_QUANT, rounding=ROUND_HALF_UP
+            )
+
+        return normalized_amount, normalized_fee, normalized_total
+
+    def _gateway_text_value(
+        self,
+        gateway_response: dict,
+        keys: set[str],
+        *,
+        max_length: int,
+        default: str = "",
+    ) -> str:
+        value = self._find_gateway_value(gateway_response, keys)
+        if value in (None, ""):
+            return default
+        text = str(value).strip()
+        if not text:
+            return default
+        return text[:max_length]
+
+    def _fetch_transaction_status(
+        self, transaction_id: str
+    ) -> tuple[dict | None, int | None, str | None]:
+        try:
+            request = Request(
+                payment_gateway_url("transaction/status"),
+                data=json.dumps({"transaction_id": transaction_id}).encode("utf-8"),
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+                method="POST",
+            )
+            with urlopen(
+                request,
+                timeout=PAYMENT_GATEWAY_TIMEOUT_SECONDS,
+                context=payment_gateway_ssl_context(),
+            ) as response:
+                response_body = response.read().decode("utf-8")
+        except HTTPError as error:
+            detail = error.read().decode("utf-8", errors="ignore")
+            message = detail or "Unable to check transaction status."
+            try:
+                parsed = json.loads(detail)
+                if isinstance(parsed, dict):
+                    message = (
+                        parsed.get("message")
+                        or parsed.get("error")
+                        or parsed.get("reason")
+                        or message
+                    )
+            except json.JSONDecodeError:
+                pass
+            return None, int(getattr(error, "code", 502) or 502), message
+        except URLError:
+            return None, 502, "Unable to reach payment gateway."
+
+        try:
+            gateway_response = json.loads(response_body)
+        except json.JSONDecodeError:
+            return None, 502, "Invalid response from payment gateway."
+        if not isinstance(gateway_response, dict):
+            return None, 502, "Unexpected response from payment gateway."
+        return gateway_response, None, None
+
+    def _reconcile_topup_transaction(
+        self,
+        *,
+        user_id: int,
+        transaction_id: str,
+        amount: Decimal,
+        platform_fee: Decimal,
+        platform_fee_percentage: Decimal,
+    ) -> None:
+        normalized_amount = amount.quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
+        if normalized_amount <= 0:
+            return
+        normalized_fee = platform_fee.quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
+        if normalized_fee < 0:
+            normalized_fee = Decimal("0.00")
+        normalized_fee_percentage = self._normalize_platform_fee_percentage(
+            platform_fee_percentage,
+            default=Decimal("0.00"),
+        )
+
+        existing = select_one(
+            """
+            SELECT
+              id,
+              user_id,
+              trans_type,
+              trans_amount,
+              platform_fee,
+              platform_fee_percentage,
+              trans_ref_type
+            FROM transactions
+            WHERE trans_ref = ?
+            LIMIT 1
+            """,
+            (transaction_id,),
+        )
+        if existing is None:
+            self._create_transaction(
+                user_id=user_id,
+                trans_type="in",
+                amount=normalized_amount,
+                trans_ref=transaction_id,
+                platform_fee=normalized_fee,
+                platform_fee_percentage=normalized_fee_percentage,
+                trans_ref_type="top-up",
+            )
+            return
+
+        existing_user_id = int(existing.get("user_id") or 0)
+        if existing_user_id != user_id:
+            raise ValueError("This transaction reference is already associated with a different account.")
+
+        current_type = str(existing.get("trans_type") or "in").strip().lower()
+        if current_type not in {"in", "out"}:
+            current_type = "in"
+        current_ref_type = str(existing.get("trans_ref_type") or "top-up").strip().lower()
+        current_amount = self._safe_decimal(existing.get("trans_amount")) or Decimal("0.00")
+        current_fee = self._safe_decimal(existing.get("platform_fee")) or Decimal("0.00")
+        current_fee_percentage = self._normalize_platform_fee_percentage(
+            existing.get("platform_fee_percentage"),
+            default=Decimal("0.00"),
+        )
+
+        current_effect = current_amount if current_type == "in" else -current_amount
+        expected_effect = normalized_amount
+        wallet_delta = (expected_effect - current_effect).quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
+
+        needs_update = (
+            current_type != "in"
+            or current_ref_type != "top-up"
+            or current_amount != normalized_amount
+            or current_fee != normalized_fee
+            or current_fee_percentage != normalized_fee_percentage
+        )
+
+        if wallet_delta != Decimal("0.00"):
+            self._ensure_wallet_row(user_id)
+            execute(
+                "UPDATE wallet_balance SET balance = balance + ? WHERE user_id = ?",
+                (wallet_delta, user_id),
+            )
+
+        if needs_update:
+            execute(
+                """
+                UPDATE transactions
+                SET trans_type = 'in',
+                    trans_amount = ?,
+                    platform_fee = ?,
+                    platform_fee_percentage = ?,
+                    trans_ref_type = 'top-up',
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    normalized_amount,
+                    normalized_fee,
+                    normalized_fee_percentage,
+                    utc_now_str(),
+                    int(existing["id"]),
+                ),
+            )
+
+    def _sync_topup_from_gateway_status(
+        self,
+        *,
+        user_id: int,
+        transaction_id: str,
+        gateway_response: dict,
+        fallback_amount: Decimal | None = None,
+        fallback_platform_fee: Decimal | None = None,
+        default_method: str = "manual-validation",
+        default_phone: str = "N/A",
+        default_channel_name: str = "UNKNOWN",
+        default_payer_code: str = "",
+        default_payer_names: str = "Wallet User",
+        default_payer_email: str | None = None,
+    ) -> tuple[str, str]:
+        response_payload = self._extract_gateway_response_payload(gateway_response)
+        details_source = response_payload if response_payload is not None else gateway_response
+
+        derived_status, derived_message = self._derive_topup_status(gateway_response)
+        amount, platform_fee, total_charge = self._extract_gateway_amounts(details_source)
+        amount, platform_fee, total_charge = self._normalize_topup_amounts(
+            amount=amount,
+            platform_fee=platform_fee,
+            total_charge=total_charge,
+            fallback_amount=fallback_amount,
+            fallback_platform_fee=fallback_platform_fee,
+        )
+
+        method = self._gateway_text_value(
+            details_source,
+            {"method", "payment_method"},
+            max_length=40,
+            default="",
+        )
+        if not method:
+            method = self._gateway_text_value(
+                gateway_response,
+                {"method", "payment_method"},
+                max_length=40,
+                default=default_method,
+            )
+        phone_number = self._gateway_text_value(
+            details_source,
+            {"phone", "phone_number", "payer_phone", "msisdn"},
+            max_length=20,
+            default="",
+        )
+        if not phone_number:
+            phone_number = self._gateway_text_value(
+                gateway_response,
+                {"phone", "phone_number", "payer_phone", "msisdn"},
+                max_length=20,
+                default=default_phone,
+            )
+        channel_name = self._gateway_text_value(
+            details_source,
+            {"channel_name", "channel"},
+            max_length=40,
+            default="",
+        )
+        if not channel_name:
+            channel_name = self._gateway_text_value(
+                gateway_response,
+                {"channel_name", "channel"},
+                max_length=40,
+                default=default_channel_name,
+            )
+        payer_code = self._gateway_text_value(
+            details_source,
+            {"payer_code"},
+            max_length=64,
+            default="",
+        )
+        if not payer_code:
+            payer_code = self._gateway_text_value(
+                gateway_response,
+                {"payer_code"},
+                max_length=64,
+                default=default_payer_code or str(user_id),
+            )
+        payer_names = self._gateway_text_value(
+            details_source,
+            {"payer_names", "payer_name"},
+            max_length=255,
+            default="",
+        )
+        if not payer_names:
+            payer_names = self._gateway_text_value(
+                gateway_response,
+                {"payer_names", "payer_name"},
+                max_length=255,
+                default=default_payer_names or "Wallet User",
+            )
+        payer_email_raw = self._gateway_text_value(
+            details_source,
+            {"payer_email", "email"},
+            max_length=255,
+            default="",
+        )
+        if not payer_email_raw:
+            payer_email_raw = self._gateway_text_value(
+                gateway_response,
+                {"payer_email", "email"},
+                max_length=255,
+                default=default_payer_email or "",
+            )
+        payer_email = payer_email_raw or None
+        gateway_tx_id_raw = self._gateway_text_value(
+            details_source,
+            {"transaction_id", "external_transaction_id"},
+            max_length=64,
+            default="",
+        )
+        if not gateway_tx_id_raw:
+            gateway_tx_id_raw = self._gateway_text_value(
+                gateway_response,
+                {"transaction_id", "external_transaction_id"},
+                max_length=64,
+                default="",
+            )
+        gateway_tx_id = gateway_tx_id_raw or None
+
+        request_amount = amount if amount > 0 else total_charge
+        if request_amount <= 0 and fallback_amount is not None and fallback_amount > 0:
+            request_amount = fallback_amount.quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
+        user_platform_fee_percentage = self._get_user_platform_fee_percentage(user_id)
+        percentage_amount_base = request_amount if request_amount > 0 else amount
+        platform_fee_percentage = self._infer_platform_fee_percentage(
+            amount=percentage_amount_base,
+            platform_fee=platform_fee,
+            fallback=user_platform_fee_percentage,
+        )
+
+        self._upsert_bk_trans_init(
+            user_id=user_id,
+            internal_ref=transaction_id,
+            transaction_id=gateway_tx_id,
+            status=derived_status,
+            message=derived_message,
+            amount=amount,
+            platform_fee=platform_fee,
+            total_charge=total_charge,
+            method=method,
+            channel_name=channel_name,
+            phone_number=phone_number,
+            payer_code=payer_code,
+            payer_names=payer_names,
+            payer_email=payer_email,
+        )
+        self._upsert_topup_request(
+            user_id=user_id,
+            transaction_id=transaction_id,
+            amount=request_amount,
+            platform_fee=platform_fee,
+            method=method,
+            phone=phone_number,
+            status=derived_status,
+        )
+
+        if derived_status == "success" and request_amount > 0:
+            self._reconcile_topup_transaction(
+                user_id=user_id,
+                transaction_id=transaction_id,
+                amount=request_amount,
+                platform_fee=platform_fee,
+                platform_fee_percentage=platform_fee_percentage,
+            )
+
+        return derived_status, derived_message
+
+    def _upsert_topup_request(
+        self,
+        *,
+        user_id: int,
+        transaction_id: str,
+        amount: Decimal,
+        platform_fee: Decimal,
+        method: str,
+        phone: str,
+        status: str,
+    ) -> None:
+        now = utc_now_str()
+        execute(
+            """
+            INSERT INTO topup_requests
+              (user_id, transaction_id, amount, platform_fee, method, phone, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE
+              amount = VALUES(amount),
+              platform_fee = VALUES(platform_fee),
+              method = VALUES(method),
+              phone = VALUES(phone),
+              status = VALUES(status),
+              updated_at = VALUES(updated_at)
+            """,
+            (
+                user_id,
+                transaction_id,
+                amount,
+                platform_fee,
+                method,
+                phone,
+                status,
+                now,
+                now,
+            ),
+        )
+
+    def _upsert_bk_trans_init(
+        self,
+        *,
+        user_id: int,
+        internal_ref: str,
+        transaction_id: str | None,
+        status: str,
+        message: str,
+        amount: Decimal,
+        platform_fee: Decimal,
+        total_charge: Decimal,
+        method: str,
+        channel_name: str,
+        phone_number: str,
+        payer_code: str,
+        payer_names: str,
+        payer_email: str | None,
+    ) -> None:
+        now = utc_now_str()
+        execute(
+            """
+            INSERT INTO bk_trans_init
+              (
+                user_id,
+                internal_transaction_ref_number,
+                transaction_id,
+                status,
+                message,
+                amount,
+                platform_fee,
+                total_charge,
+                method,
+                channel_name,
+                phone_number,
+                payer_code,
+                payer_names,
+                payer_email,
+                created_at,
+                updated_at
+              )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE
+              transaction_id = VALUES(transaction_id),
+              status = VALUES(status),
+              message = VALUES(message),
+              amount = VALUES(amount),
+              platform_fee = VALUES(platform_fee),
+              total_charge = VALUES(total_charge),
+              method = VALUES(method),
+              channel_name = VALUES(channel_name),
+              phone_number = VALUES(phone_number),
+              payer_code = VALUES(payer_code),
+              payer_names = VALUES(payer_names),
+              payer_email = VALUES(payer_email),
+              updated_at = VALUES(updated_at)
+            """,
+            (
+                user_id,
+                internal_ref,
+                transaction_id,
+                status,
+                message,
+                amount,
+                platform_fee,
+                total_charge,
+                method,
+                channel_name,
+                phone_number,
+                payer_code,
+                payer_names,
+                payer_email,
+                now,
+                now,
+            ),
+        )
 
     def _wallet_topup(self) -> None:
         user_id = self._require_user()
@@ -1061,7 +2088,7 @@ class AdminHandler(BaseHTTPRequestHandler):
 
         user_row = select_one(
             """
-            SELECT id, name, email, business_name, business_email
+            SELECT id, name, email, business_name, business_email, platform_fee_percentage
             FROM users
             WHERE id = ?
             """,
@@ -1080,7 +2107,10 @@ class AdminHandler(BaseHTTPRequestHandler):
         )
         payer_email = (user_row.get("business_email") or user_row.get("email") or "").strip()
         channel_name = "MOMO" if method == "Mobile Money - MTN" else "AIRTEL MONEY"
-        platform_fee = (amount * Decimal("0.10")).quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
+        user_platform_fee_percentage = self._normalize_platform_fee_percentage(
+            user_row.get("platform_fee_percentage")
+        )
+        platform_fee = self._percentage_to_fee(amount, user_platform_fee_percentage)
         total_charge = (amount + platform_fee).quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
 
         gateway_payload = {
@@ -1094,7 +2124,7 @@ class AdminHandler(BaseHTTPRequestHandler):
 
         try:
             request = Request(
-                "https://bk-api.magiquetechnologies.tech/api/payment/initiate",
+                payment_gateway_url("payment/initiate"),
                 data=json.dumps(gateway_payload).encode("utf-8"),
                 headers={
                     "Content-Type": "application/json",
@@ -1102,7 +2132,11 @@ class AdminHandler(BaseHTTPRequestHandler):
                 },
                 method="POST",
             )
-            with urlopen(request, timeout=20, context=ssl._create_unverified_context()) as response:
+            with urlopen(
+                request,
+                timeout=PAYMENT_GATEWAY_TIMEOUT_SECONDS,
+                context=payment_gateway_ssl_context(),
+            ) as response:
                 response_body = response.read().decode("utf-8")
         except HTTPError as error:
             detail = error.read().decode("utf-8", errors="ignore")
@@ -1158,86 +2192,31 @@ class AdminHandler(BaseHTTPRequestHandler):
             or "Transaction pending confirmation."
         ).strip()
 
-        now = utc_now_str()
-        execute(
-            """
-            INSERT INTO topup_requests
-              (user_id, transaction_id, amount, platform_fee, method, phone, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
-            ON DUPLICATE KEY UPDATE
-              amount = VALUES(amount),
-              platform_fee = VALUES(platform_fee),
-              method = VALUES(method),
-              phone = VALUES(phone),
-              status = 'pending',
-              updated_at = VALUES(updated_at)
-            """,
-            (
-                user_id,
-                internal_ref,
-                amount,
-                platform_fee,
-                method,
-                phone,
-                now,
-                now,
-            ),
+        self._upsert_topup_request(
+            user_id=user_id,
+            transaction_id=internal_ref,
+            amount=amount,
+            platform_fee=platform_fee,
+            method=method,
+            phone=phone,
+            status="pending",
         )
 
-        execute(
-            """
-            INSERT INTO bk_trans_init
-              (
-                user_id,
-                internal_transaction_ref_number,
-                transaction_id,
-                status,
-                message,
-                amount,
-                platform_fee,
-                total_charge,
-                method,
-                channel_name,
-                phone_number,
-                payer_code,
-                payer_names,
-                payer_email,
-                created_at,
-                updated_at
-              )
-            VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON DUPLICATE KEY UPDATE
-              transaction_id = VALUES(transaction_id),
-              status = 'pending',
-              message = VALUES(message),
-              amount = VALUES(amount),
-              platform_fee = VALUES(platform_fee),
-              total_charge = VALUES(total_charge),
-              method = VALUES(method),
-              channel_name = VALUES(channel_name),
-              phone_number = VALUES(phone_number),
-              payer_code = VALUES(payer_code),
-              payer_names = VALUES(payer_names),
-              payer_email = VALUES(payer_email),
-              updated_at = VALUES(updated_at)
-            """,
-            (
-                user_id,
-                internal_ref,
-                gateway_transaction_id,
-                init_message,
-                amount,
-                platform_fee,
-                total_charge,
-                method,
-                channel_name,
-                phone,
-                str(user_id),
-                str(payer_name).strip(),
-                payer_email or None,
-                now,
-                now,
-            ),
+        self._upsert_bk_trans_init(
+            user_id=user_id,
+            internal_ref=internal_ref,
+            transaction_id=gateway_transaction_id,
+            status="pending",
+            message=init_message,
+            amount=amount,
+            platform_fee=platform_fee,
+            total_charge=total_charge,
+            method=method,
+            channel_name=channel_name,
+            phone_number=phone,
+            payer_code=str(user_id),
+            payer_names=str(payer_name).strip(),
+            payer_email=payer_email or None,
         )
 
         self._send_json(
@@ -1267,7 +2246,7 @@ class AdminHandler(BaseHTTPRequestHandler):
 
         request_row = select_one(
             """
-            SELECT id, amount, platform_fee, status
+            SELECT id, amount, platform_fee, status, method, phone
             FROM topup_requests
             WHERE user_id = ? AND transaction_id = ?
             """,
@@ -1275,7 +2254,18 @@ class AdminHandler(BaseHTTPRequestHandler):
         )
         init_row = select_one(
             """
-            SELECT id, amount, platform_fee, status, message
+            SELECT
+              id,
+              amount,
+              platform_fee,
+              status,
+              message,
+              method,
+              phone_number,
+              channel_name,
+              payer_code,
+              payer_names,
+              payer_email
             FROM bk_trans_init
             WHERE user_id = ? AND internal_transaction_ref_number = ?
             """,
@@ -1285,102 +2275,217 @@ class AdminHandler(BaseHTTPRequestHandler):
             self._send_json(404, {"error": "Transaction not found."})
             return
 
-        request_status = str((request_row or {}).get("status") or "pending").lower()
-        init_status = str((init_row or {}).get("status") or "pending").lower()
-        status = request_status
-        if status == "pending" and init_status in {"success", "failed"}:
-            status = init_status
-        if status == "success":
-            self._update_bk_trans_status(user_id, transaction_id, "success", "Transaction Successful")
-            self._send_json(200, {"status": "success", "message": "Transaction Successful"})
-            return
-        if status == "failed":
-            failed_message = str((init_row or {}).get("message") or "Transaction Failed").strip()
-            self._update_bk_trans_status(user_id, transaction_id, "failed", failed_message)
-            self._send_json(200, {"status": "failed", "message": failed_message})
+        fallback_amount = self._safe_decimal((init_row or {}).get("amount"))
+        if fallback_amount is None:
+            fallback_amount = self._safe_decimal((request_row or {}).get("amount"))
+        fallback_platform_fee = self._safe_decimal((init_row or {}).get("platform_fee"))
+        if fallback_platform_fee is None:
+            fallback_platform_fee = self._safe_decimal((request_row or {}).get("platform_fee"))
+
+        default_method = str((init_row or {}).get("method") or (request_row or {}).get("method") or "wallet-topup")
+        default_phone = str(
+            (init_row or {}).get("phone_number") or (request_row or {}).get("phone") or "N/A"
+        )
+        default_channel_name = str((init_row or {}).get("channel_name") or "UNKNOWN")
+        default_payer_code = str((init_row or {}).get("payer_code") or user_id)
+        default_payer_names = str((init_row or {}).get("payer_names") or "Wallet User")
+        default_payer_email = (init_row or {}).get("payer_email")
+        if default_payer_email not in (None, ""):
+            default_payer_email = str(default_payer_email)
+        else:
+            default_payer_email = None
+
+        gateway_response, error_code, error_message = self._fetch_transaction_status(transaction_id)
+        if gateway_response is None:
+            self._send_json(int(error_code or 502), {"error": error_message or "Unable to validate transaction."})
             return
 
         try:
-            request = Request(
-                "https://bk-api.magiquetechnologies.tech/api/transaction/status",
-                data=json.dumps({"transaction_id": transaction_id}).encode("utf-8"),
-                headers={
-                    "Content-Type": "application/json",
-                    "Accept": "application/json",
-                },
-                method="POST",
+            derived_status, derived_message = self._sync_topup_from_gateway_status(
+                user_id=user_id,
+                transaction_id=transaction_id,
+                gateway_response=gateway_response,
+                fallback_amount=fallback_amount,
+                fallback_platform_fee=fallback_platform_fee,
+                default_method=default_method,
+                default_phone=default_phone,
+                default_channel_name=default_channel_name,
+                default_payer_code=default_payer_code,
+                default_payer_names=default_payer_names,
+                default_payer_email=default_payer_email,
             )
-            with urlopen(request, timeout=20, context=ssl._create_unverified_context()) as response:
-                response_body = response.read().decode("utf-8")
-        except HTTPError as error:
-            detail = error.read().decode("utf-8", errors="ignore")
-            message = detail or "Unable to check transaction status."
-            try:
-                parsed = json.loads(detail)
-                message = parsed.get("message") or parsed.get("error") or message
-            except json.JSONDecodeError:
-                pass
-            self._send_json(int(getattr(error, "code", 502) or 502), {"error": message})
+        except ValueError as error:
+            self._send_json(403, {"error": str(error)})
             return
-        except URLError:
-            self._send_json(502, {"error": "Unable to reach payment gateway."})
+
+        self._send_json(
+            200,
+            {
+                "status": derived_status,
+                "message": derived_message,
+                "transaction_id": transaction_id,
+            },
+        )
+
+    def _wallet_manual_validate(self) -> None:
+        user_id = self._require_user()
+        if not user_id:
             return
 
         try:
-            gateway_response = json.loads(response_body)
+            payload = self._read_json()
         except json.JSONDecodeError:
-            self._send_json(502, {"error": "Invalid response from payment gateway."})
-            return
-        if not isinstance(gateway_response, dict):
-            self._send_json(502, {"error": "Unexpected response from payment gateway."})
+            self._send_json(400, {"error": "Invalid JSON body."})
             return
 
-        derived_status, derived_message = self._derive_topup_status(gateway_response)
-
-        if derived_status == "success":
-            existing = select_one(
-                """
-                SELECT id FROM transactions
-                WHERE user_id = ? AND trans_ref = ? AND trans_ref_type = 'top-up'
-                """,
-                (user_id, transaction_id),
+        transaction_id = str(
+            payload.get("transaction_id")
+            or payload.get("transaction_reference_number")
+            or ""
+        ).strip()
+        if not INTERNAL_REF_REGEX.fullmatch(transaction_id):
+            self._send_json(
+                400,
+                {
+                    "error": (
+                        "Transaction Reference Number must contain exactly 20 digits."
+                    )
+                },
             )
-            if existing is None:
-                amount_raw = (request_row or {}).get("amount")
-                if amount_raw is None:
-                    amount_raw = (init_row or {}).get("amount")
-                fee_raw = (request_row or {}).get("platform_fee")
-                if fee_raw is None:
-                    fee_raw = (init_row or {}).get("platform_fee")
-
-                amount = Decimal(str(amount_raw or 0))
-                platform_fee = Decimal(str(fee_raw or 0))
-                self._create_transaction(
-                    user_id=user_id,
-                    trans_type="in",
-                    amount=amount,
-                    trans_ref=transaction_id,
-                    platform_fee=platform_fee,
-                    trans_ref_type="top-up",
-                )
-            self._update_topup_request_status(user_id, transaction_id, "success")
-            self._update_bk_trans_status(user_id, transaction_id, "success", derived_message)
-            self._send_json(200, {"status": "success", "message": derived_message})
             return
 
-        if derived_status == "pending":
-            self._update_topup_request_status(user_id, transaction_id, "pending")
-            self._update_bk_trans_status(user_id, transaction_id, "pending", derived_message)
-            self._send_json(200, {"status": "pending", "message": derived_message})
+        existing_init = select_one(
+            """
+            SELECT
+              user_id,
+              status,
+              message,
+              amount,
+              platform_fee,
+              total_charge,
+              method,
+              phone_number,
+              channel_name,
+              payer_code,
+              payer_names,
+              payer_email
+            FROM bk_trans_init
+            WHERE internal_transaction_ref_number = ?
+            """,
+            (transaction_id,),
+        )
+        if existing_init is not None and int(existing_init.get("user_id") or 0) != user_id:
+            self._send_json(
+                403,
+                {
+                    "error": (
+                        "This transaction reference is already associated with a different account."
+                    )
+                },
+            )
             return
 
-        reason = str(gateway_response.get("reason") or "").strip()
-        failed_message = derived_message
-        if reason and reason not in failed_message:
-            failed_message = f"{failed_message}. {reason}"
-        self._update_topup_request_status(user_id, transaction_id, "failed")
-        self._update_bk_trans_status(user_id, transaction_id, "failed", failed_message)
-        self._send_json(200, {"status": "failed", "message": failed_message})
+        existing_request = select_one(
+            """
+            SELECT user_id, amount, platform_fee, method, phone
+            FROM topup_requests
+            WHERE transaction_id = ?
+            """,
+            (transaction_id,),
+        )
+        if existing_request is not None and int(existing_request.get("user_id") or 0) != user_id:
+            self._send_json(
+                403,
+                {
+                    "error": (
+                        "This transaction reference is already associated with a different account."
+                    )
+                },
+            )
+            return
+
+        existing_transaction = select_one(
+            """
+            SELECT user_id, trans_amount, platform_fee
+            FROM transactions
+            WHERE trans_ref = ?
+            LIMIT 1
+            """,
+            (transaction_id,),
+        )
+        if existing_transaction is not None and int(existing_transaction.get("user_id") or 0) != user_id:
+            self._send_json(
+                403,
+                {
+                    "error": (
+                        "This transaction reference is already associated with a different account."
+                    )
+                },
+            )
+            return
+
+        fallback_amount = self._safe_decimal((existing_init or {}).get("amount"))
+        if fallback_amount is None:
+            fallback_amount = self._safe_decimal((existing_request or {}).get("amount"))
+        if fallback_amount is None:
+            fallback_amount = self._safe_decimal((existing_transaction or {}).get("trans_amount"))
+
+        fallback_platform_fee = self._safe_decimal((existing_init or {}).get("platform_fee"))
+        if fallback_platform_fee is None:
+            fallback_platform_fee = self._safe_decimal((existing_request or {}).get("platform_fee"))
+        if fallback_platform_fee is None:
+            fallback_platform_fee = self._safe_decimal((existing_transaction or {}).get("platform_fee"))
+
+        default_method = str(
+            (existing_init or {}).get("method")
+            or (existing_request or {}).get("method")
+            or "manual-validation"
+        )
+        default_phone = str(
+            (existing_init or {}).get("phone_number")
+            or (existing_request or {}).get("phone")
+            or "N/A"
+        )
+        default_channel_name = str((existing_init or {}).get("channel_name") or "UNKNOWN")
+        default_payer_code = str((existing_init or {}).get("payer_code") or user_id)
+        default_payer_names = str((existing_init or {}).get("payer_names") or "Manual Validation")
+        default_payer_email = (existing_init or {}).get("payer_email")
+        if default_payer_email not in (None, ""):
+            default_payer_email = str(default_payer_email)
+        else:
+            default_payer_email = None
+
+        gateway_response, error_code, error_message = self._fetch_transaction_status(transaction_id)
+        if gateway_response is None:
+            self._send_json(int(error_code or 502), {"error": error_message or "Unable to validate transaction."})
+            return
+
+        try:
+            derived_status, derived_message = self._sync_topup_from_gateway_status(
+                user_id=user_id,
+                transaction_id=transaction_id,
+                gateway_response=gateway_response,
+                fallback_amount=fallback_amount,
+                fallback_platform_fee=fallback_platform_fee,
+                default_method=default_method,
+                default_phone=default_phone,
+                default_channel_name=default_channel_name,
+                default_payer_code=default_payer_code,
+                default_payer_names=default_payer_names,
+                default_payer_email=default_payer_email,
+            )
+        except ValueError as error:
+            self._send_json(403, {"error": str(error)})
+            return
+
+        self._send_json(
+            200,
+            {
+                "status": derived_status,
+                "message": derived_message,
+                "transaction_id": transaction_id,
+            },
+        )
 
     def _get_wallet(self) -> None:
         user_id = self._require_user()
@@ -1395,7 +2500,15 @@ class AdminHandler(BaseHTTPRequestHandler):
 
         row = select_one(
             """
-            SELECT id, account_type, name, email, phone, business_name, business_email
+            SELECT
+              id,
+              account_type,
+              name,
+              email,
+              phone,
+              business_name,
+              business_email,
+              platform_fee_percentage
             FROM users
             WHERE id = ?
             """,
@@ -1411,6 +2524,9 @@ class AdminHandler(BaseHTTPRequestHandler):
             display_name = str(row.get("business_name") or row.get("name") or email or "Business User")
         else:
             display_name = str(row.get("name") or email or "User")
+        platform_fee_percentage = self._normalize_platform_fee_percentage(
+            row.get("platform_fee_percentage")
+        )
 
         self._send_json(
             200,
@@ -1420,6 +2536,7 @@ class AdminHandler(BaseHTTPRequestHandler):
                 "display_name": display_name.strip(),
                 "email": email,
                 "phone": (row.get("phone") or "").strip(),
+                "platform_fee_percentage": float(platform_fee_percentage),
             },
         )
 
@@ -1441,8 +2558,11 @@ class AdminHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "Current and new password are required."})
             return
 
-        if len(new_password) < 6:
-            self._send_json(400, {"error": "New password must be at least 6 characters."})
+        if len(new_password) < PASSWORD_MIN_LENGTH:
+            self._send_json(
+                400,
+                {"error": f"New password must be at least {PASSWORD_MIN_LENGTH} characters."},
+            )
             return
 
         user_row = select_one(
@@ -1551,7 +2671,7 @@ class AdminHandler(BaseHTTPRequestHandler):
             JOIN transactions t ON t.user_id = s.user_id
               AND t.trans_type = 'out'
               AND t.trans_ref_type = 'airtime'
-              AND CAST(t.trans_ref AS UNSIGNED) = s.id
+              AND t.trans_ref = CONCAT('airtime-', CAST(s.id AS CHAR))
             WHERE ar.user_id = ?
               AND s.approved = 1
               AND s.deleted_at IS NULL
@@ -1597,7 +2717,7 @@ class AdminHandler(BaseHTTPRequestHandler):
             JOIN transactions t ON t.user_id = s.user_id
               AND t.trans_type = 'out'
               AND t.trans_ref_type = 'funds'
-              AND CAST(t.trans_ref AS UNSIGNED) = s.id
+              AND t.trans_ref = CONCAT('funds-', CAST(s.id AS CHAR))
             WHERE fr.user_id = ?
               AND s.approved = 1
               AND s.deleted_at IS NULL
@@ -2365,7 +3485,7 @@ class AdminHandler(BaseHTTPRequestHandler):
                 user_id=user_id,
                 trans_type="out",
                 amount=total_amount,
-                trans_ref=str(schedule_id),
+                trans_ref=f"airtime-{schedule_id}",
                 trans_ref_type="airtime",
             )
         except ValueError as error:
@@ -2826,7 +3946,7 @@ class AdminHandler(BaseHTTPRequestHandler):
                 user_id=user_id,
                 trans_type="out",
                 amount=total_amount,
-                trans_ref=str(schedule_id),
+                trans_ref=f"funds-{schedule_id}",
                 trans_ref_type="funds",
             )
         except ValueError as error:
@@ -2857,6 +3977,11 @@ class AdminHandler(BaseHTTPRequestHandler):
         password = fields.get("password") or ""
         confirm_password = fields.get("confirm_password") or ""
 
+        if len(password) < PASSWORD_MIN_LENGTH:
+            self._redirect(
+                f"signup.html?error=Password%20must%20be%20at%20least%20{PASSWORD_MIN_LENGTH}%20characters"
+            )
+            return
         if password != confirm_password:
             self._redirect("signup.html?error=Passwords%20do%20not%20match")
             return
@@ -2878,7 +4003,11 @@ class AdminHandler(BaseHTTPRequestHandler):
                 self._redirect("signup.html?error=Invalid%20phone%20format")
                 return
 
-            national_id_path = self._save_upload(national_file)
+            try:
+                national_id_path = self._save_upload(national_file)
+            except ValueError as error:
+                self._redirect(f"signup.html?error={quote(str(error))}")
+                return
             business_name = None
             business_email = None
             business_reg_no = None
@@ -2893,7 +4022,11 @@ class AdminHandler(BaseHTTPRequestHandler):
                 self._redirect("signup.html?error=Missing%20required%20fields")
                 return
 
-            business_reg_path = self._save_upload(business_file)
+            try:
+                business_reg_path = self._save_upload(business_file)
+            except ValueError as error:
+                self._redirect(f"signup.html?error={quote(str(error))}")
+                return
             name = None
             email = business_email
             phone = None
@@ -2937,7 +4070,7 @@ class AdminHandler(BaseHTTPRequestHandler):
         self._redirect(
             "index.html",
             headers={
-                "Set-Cookie": f"{SESSION_COOKIE}={session_id}; HttpOnly; SameSite=Lax; Path=/"
+                "Set-Cookie": self._build_session_cookie(session_id)
             },
         )
 
@@ -2949,6 +4082,13 @@ class AdminHandler(BaseHTTPRequestHandler):
         if not email or not password:
             self._redirect("login.html?error=Missing%20credentials")
             return
+        rate_limit_key = self._login_rate_limit_key(email)
+        block_remaining_seconds = self._login_block_remaining_seconds(rate_limit_key)
+        if block_remaining_seconds > 0:
+            self._redirect(
+                f"login.html?error=Too%20many%20attempts.%20Try%20again%20in%20{block_remaining_seconds}%20seconds"
+            )
+            return
 
         user = select_one(
             "SELECT id, password_hash, password_salt FROM users WHERE email = ?",
@@ -2957,14 +4097,16 @@ class AdminHandler(BaseHTTPRequestHandler):
         if user is None or not verify_password(
             password, user["password_hash"], user["password_salt"]
         ):
+            self._register_login_failure(rate_limit_key)
             self._redirect("login.html?error=Invalid%20credentials")
             return
 
+        self._clear_login_failures(rate_limit_key)
         session_id = self._create_session(int(user["id"]))
         self._redirect(
             "index.html",
             headers={
-                "Set-Cookie": f"{SESSION_COOKIE}={session_id}; HttpOnly; SameSite=Lax; Path=/"
+                "Set-Cookie": self._build_session_cookie(session_id)
             },
         )
 
@@ -2974,7 +4116,7 @@ class AdminHandler(BaseHTTPRequestHandler):
         self._send_json(
             200,
             {"status": "logged_out"},
-            headers={"Set-Cookie": f"{SESSION_COOKIE}=deleted; Path=/; Max-Age=0"},
+            headers={"Set-Cookie": self._build_session_cookie("deleted", delete=True)},
         )
 
     def _handle_api(self) -> bool:
@@ -3099,6 +4241,14 @@ class AdminHandler(BaseHTTPRequestHandler):
                 ):
                     self._wallet_topup_status()
                     return True
+                if (
+                    self.command == "POST"
+                    and len(segments) == 4
+                    and segments[2] == "topup"
+                    and segments[3] == "manual-validate"
+                ):
+                    self._wallet_manual_validate()
+                    return True
 
             if resource == "me":
                 if self.command == "GET" and len(segments) == 2:
@@ -3114,6 +4264,9 @@ class AdminHandler(BaseHTTPRequestHandler):
                     return True
 
             self._send_json(405, {"error": "Method not allowed."})
+            return True
+        except RequestTooLargeError:
+            self._send_json(413, {"error": "Request body too large."})
             return True
         except MySQLError as error:
             self._send_json(500, {"error": f"Database error: {str(error)}"})
@@ -3157,12 +4310,25 @@ class AdminHandler(BaseHTTPRequestHandler):
         if not requested.exists() or requested.is_dir():
             self._send_text(404, "Not found", "text/plain; charset=utf-8")
             return
+        try:
+            relative_path = requested.relative_to(ROOT).as_posix()
+        except ValueError:
+            self._send_text(404, "Not found", "text/plain; charset=utf-8")
+            return
+        if relative_path.startswith("uploads/"):
+            if not is_logged_in:
+                self._send_text(404, "Not found", "text/plain; charset=utf-8")
+                return
+        elif relative_path not in PUBLIC_STATIC_FILES:
+            self._send_text(404, "Not found", "text/plain; charset=utf-8")
+            return
 
         content_type, _ = mimetypes.guess_type(requested)
         content_type = content_type or "application/octet-stream"
         data = requested.read_bytes()
 
         self.send_response(200)
+        self._add_security_headers()
         if content_type.startswith("text/") or content_type in {
             "application/javascript",
             "application/json",
@@ -3171,6 +4337,8 @@ class AdminHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", f"{content_type}; charset=utf-8")
         else:
             self.send_header("Content-Type", content_type)
+        if relative_path.startswith("uploads/"):
+            self.send_header("Content-Disposition", "attachment")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
@@ -3184,12 +4352,16 @@ class AdminHandler(BaseHTTPRequestHandler):
         if self.path == "/signup":
             try:
                 self._handle_signup()
+            except RequestTooLargeError:
+                self._redirect("signup.html?error=Request%20body%20too%20large")
             except MySQLError as error:
                 self._redirect(f"signup.html?error={str(error)}")
             return
         if self.path == "/login":
             try:
                 self._handle_login()
+            except RequestTooLargeError:
+                self._redirect("login.html?error=Request%20body%20too%20large")
             except MySQLError as error:
                 self._redirect(f"login.html?error={str(error)}")
             return
