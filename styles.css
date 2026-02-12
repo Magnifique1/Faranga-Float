@@ -770,15 +770,7 @@ body[data-page="dashboard"] .canvas + .canvas {
   gap: 10px;
 }
 
-#schedule-modal .form-actions,
-#funds-schedule-modal .form-actions {
-  margin-top: 16px;
-  padding-top: 12px;
-  border-top: 1px solid rgba(29, 34, 51, 0.08);
-}
-
-#schedule-approve-modal .form-actions,
-#funds-schedule-approve-modal .form-actions {
+.modal-card .modal-footer-actions {
   margin-top: 18px;
   padding-top: 14px;
   border-top: 1px solid rgba(29, 34, 51, 0.1);
@@ -786,12 +778,9 @@ body[data-page="dashboard"] .canvas + .canvas {
   gap: 12px;
 }
 
-#schedule-approve-modal .form-actions .ghost,
-#schedule-approve-modal .form-actions .danger,
-#schedule-approve-modal .form-actions .primary,
-#funds-schedule-approve-modal .form-actions .ghost,
-#funds-schedule-approve-modal .form-actions .danger,
-#funds-schedule-approve-modal .form-actions .primary {
+.modal-card .modal-footer-actions .ghost,
+.modal-card .modal-footer-actions .danger,
+.modal-card .modal-footer-actions .primary {
   min-width: 110px;
   padding: 10px 16px;
 }
@@ -811,14 +800,6 @@ body[data-page="dashboard"] .canvas + .canvas {
 #schedule-approve-modal .form-actions .primary,
 #funds-schedule-approve-modal .form-actions .primary {
   box-shadow: 0 10px 20px -14px rgba(240, 143, 50, 0.9);
-}
-
-#schedule-edit-modal .form-actions,
-#funds-schedule-edit-modal .form-actions {
-  margin-top: 18px;
-  padding-top: 14px;
-  border-top: 1px solid rgba(29, 34, 51, 0.1);
-  justify-content: flex-end;
 }
 
 .schedule-edit-list {

@@ -88,7 +88,7 @@ ALLOWED_UPLOAD_EXTENSIONS = {
     ".doc",
     ".docx",
 }
-DB_SCHEMA_VERSION = "2026-02-12-status-reconcile-user-platform-fee"
+DB_SCHEMA_VERSION = "2026-02-12-topup-net-credit-reconcile"
 DB_INIT_MARKER = Path(os.getenv("DB_INIT_MARKER_PATH", f"/tmp/{MYSQL_DB}_db_schema_version"))
 LOGIN_FAILURE_TRACKER: dict[str, list[float]] = {}
 LOGIN_BLOCKED_UNTIL: dict[str, float] = {}
@@ -175,6 +175,378 @@ def to_money(value: object) -> Decimal:
 
 def money_to_float(value: Decimal) -> float:
     return float(value.quantize(MONEY_QUANT, rounding=ROUND_HALF_UP))
+
+
+def _safe_decimal_value(value: object) -> Decimal | None:
+    if value is None:
+        return None
+    text = str(value).strip().replace(",", "")
+    if not text:
+        return None
+    try:
+        return Decimal(text).quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+
+
+def _normalize_platform_fee_percentage_value(
+    value: object,
+    *,
+    default: Decimal = PLATFORM_FEE_PERCENTAGE_DEFAULT,
+) -> Decimal:
+    parsed = _safe_decimal_value(value)
+    if parsed is None:
+        parsed = default.quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
+    if parsed < PLATFORM_FEE_PERCENTAGE_MIN:
+        return PLATFORM_FEE_PERCENTAGE_MIN
+    if parsed > PLATFORM_FEE_PERCENTAGE_MAX:
+        return PLATFORM_FEE_PERCENTAGE_MAX
+    return parsed.quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
+
+
+def _percentage_to_fee_value(amount: Decimal, percentage: Decimal) -> Decimal:
+    normalized_amount = amount.quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
+    normalized_percentage = _normalize_platform_fee_percentage_value(percentage)
+    return ((normalized_amount * normalized_percentage) / Decimal("100")).quantize(
+        MONEY_QUANT, rounding=ROUND_HALF_UP
+    )
+
+
+def _net_and_fee_from_total_charge_value(
+    total_charge: Decimal,
+    percentage: Decimal,
+) -> tuple[Decimal, Decimal]:
+    normalized_total = total_charge.quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
+    normalized_percentage = _normalize_platform_fee_percentage_value(percentage)
+    if normalized_total <= 0:
+        return Decimal("0.00"), Decimal("0.00")
+    if normalized_percentage <= 0:
+        return normalized_total, Decimal("0.00")
+
+    divisor = Decimal("1.00") + (normalized_percentage / Decimal("100"))
+    if divisor <= 0:
+        return normalized_total, Decimal("0.00")
+
+    amount = (normalized_total / divisor).quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
+    fee = (normalized_total - amount).quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
+    if fee < 0:
+        return normalized_total, Decimal("0.00")
+    return amount, fee
+
+
+def _canonical_topup_amounts_from_user_percentage(
+    *,
+    user_fee_percentage: Decimal,
+    fallback_amount: Decimal | None,
+    amount: Decimal,
+    platform_fee: Decimal,
+    total_charge: Decimal,
+) -> tuple[Decimal, Decimal, Decimal]:
+    normalized_percentage = _normalize_platform_fee_percentage_value(user_fee_percentage)
+    normalized_fallback = (
+        fallback_amount.quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
+        if fallback_amount is not None and fallback_amount > 0
+        else None
+    )
+    normalized_amount = amount.quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
+    normalized_fee = platform_fee.quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
+    normalized_total = total_charge.quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
+
+    if normalized_fallback is not None and normalized_total > 0 and normalized_percentage > 0:
+        if normalized_fallback >= normalized_total:
+            normalized_fallback = None
+
+    if normalized_fallback is not None and normalized_fallback > 0:
+        amount_value = normalized_fallback
+        fee_value = _percentage_to_fee_value(amount_value, normalized_percentage)
+        total_value = (amount_value + fee_value).quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
+        return amount_value, fee_value, total_value
+
+    has_total_signal = normalized_fee > 0 or (normalized_total > 0 and normalized_total != normalized_amount)
+    if normalized_total > 0 and has_total_signal:
+        amount_value, fee_value = _net_and_fee_from_total_charge_value(
+            normalized_total,
+            normalized_percentage,
+        )
+        return amount_value, fee_value, normalized_total
+
+    if normalized_amount > 0:
+        amount_value = normalized_amount
+        fee_value = _percentage_to_fee_value(amount_value, normalized_percentage)
+        total_value = (amount_value + fee_value).quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
+        return amount_value, fee_value, total_value
+
+    if normalized_total > 0:
+        amount_value, fee_value = _net_and_fee_from_total_charge_value(
+            normalized_total,
+            normalized_percentage,
+        )
+        return amount_value, fee_value, normalized_total
+
+    return Decimal("0.00"), Decimal("0.00"), Decimal("0.00")
+
+
+def _reconcile_existing_topup_financials() -> None:
+    now = utc_now_str()
+    init_rows = select_all(
+        """
+        SELECT
+          bti.id AS init_id,
+          bti.user_id,
+          bti.internal_transaction_ref_number AS transaction_ref,
+          bti.amount AS init_amount,
+          bti.platform_fee AS init_platform_fee,
+          bti.total_charge AS init_total_charge,
+          u.platform_fee_percentage AS user_platform_fee_percentage,
+          tr.id AS request_id,
+          tr.amount AS request_amount,
+          tr.platform_fee AS request_platform_fee,
+          t.id AS tx_id,
+          t.trans_type,
+          t.trans_ref_type,
+          t.trans_amount AS tx_amount,
+          t.platform_fee AS tx_platform_fee,
+          t.platform_fee_percentage AS tx_platform_fee_percentage
+        FROM bk_trans_init bti
+        JOIN users u ON u.id = bti.user_id
+        LEFT JOIN topup_requests tr
+          ON tr.user_id = bti.user_id AND tr.transaction_id = bti.internal_transaction_ref_number
+        LEFT JOIN transactions t
+          ON t.user_id = bti.user_id AND t.trans_ref = bti.internal_transaction_ref_number
+        """
+    )
+
+    for row in init_rows:
+        user_fee_percentage = _normalize_platform_fee_percentage_value(
+            row.get("user_platform_fee_percentage")
+        )
+
+        init_amount = _safe_decimal_value(row.get("init_amount")) or Decimal("0.00")
+        init_fee = _safe_decimal_value(row.get("init_platform_fee")) or Decimal("0.00")
+        init_total = _safe_decimal_value(row.get("init_total_charge")) or Decimal("0.00")
+        request_amount = _safe_decimal_value(row.get("request_amount"))
+        request_fee = _safe_decimal_value(row.get("request_platform_fee"))
+        tx_amount = _safe_decimal_value(row.get("tx_amount"))
+        tx_fee = _safe_decimal_value(row.get("tx_platform_fee"))
+
+        tx_type = str(row.get("trans_type") or "").strip().lower()
+        fallback_amount = None
+        if request_amount is not None and request_amount > 0:
+            fallback_amount = request_amount
+        elif tx_amount is not None and tx_amount > 0 and tx_type == "in":
+            fallback_amount = tx_amount
+        elif init_amount > 0:
+            fallback_amount = init_amount
+
+        observed_amount = init_amount
+        if observed_amount <= 0 and request_amount is not None and request_amount > 0:
+            observed_amount = request_amount
+        if observed_amount <= 0 and tx_amount is not None and tx_amount > 0:
+            observed_amount = tx_amount
+
+        observed_fee = init_fee
+        if observed_fee <= 0 and request_fee is not None and request_fee > 0:
+            observed_fee = request_fee
+        if observed_fee <= 0 and tx_fee is not None and tx_fee > 0:
+            observed_fee = tx_fee
+
+        observed_total = init_total
+        if observed_total <= 0 and request_amount is not None and request_amount > 0:
+            observed_total = (
+                request_amount + (request_fee if request_fee is not None and request_fee > 0 else Decimal("0.00"))
+            ).quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
+        if observed_total <= 0 and tx_amount is not None and tx_amount > 0:
+            observed_total = (
+                tx_amount + (tx_fee if tx_fee is not None and tx_fee > 0 else Decimal("0.00"))
+            ).quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
+
+        corrected_amount, corrected_fee, corrected_total_charge = _canonical_topup_amounts_from_user_percentage(
+            user_fee_percentage=user_fee_percentage,
+            fallback_amount=fallback_amount,
+            amount=observed_amount,
+            platform_fee=observed_fee,
+            total_charge=observed_total,
+        )
+        if corrected_amount <= 0:
+            continue
+
+        if (
+            init_amount != corrected_amount
+            or init_fee != corrected_fee
+            or init_total != corrected_total_charge
+        ):
+            execute(
+                """
+                UPDATE bk_trans_init
+                SET amount = ?,
+                    platform_fee = ?,
+                    total_charge = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (corrected_amount, corrected_fee, corrected_total_charge, now, int(row["init_id"])),
+            )
+
+        request_id = row.get("request_id")
+        if request_id is not None:
+            current_request_amount = request_amount or Decimal("0.00")
+            current_request_fee = request_fee or Decimal("0.00")
+            if current_request_amount != corrected_amount or current_request_fee != corrected_fee:
+                execute(
+                    """
+                    UPDATE topup_requests
+                    SET amount = ?,
+                        platform_fee = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (corrected_amount, corrected_fee, now, int(request_id)),
+                )
+
+        tx_id = row.get("tx_id")
+        if tx_id is not None:
+            current_tx_amount = tx_amount or Decimal("0.00")
+            current_tx_fee = tx_fee or Decimal("0.00")
+            current_tx_fee_percentage = _normalize_platform_fee_percentage_value(
+                row.get("tx_platform_fee_percentage"),
+                default=Decimal("0.00"),
+            )
+            current_tx_ref_type = str(row.get("trans_ref_type") or "").strip().lower()
+            tx_needs_update = (
+                tx_type != "in"
+                or current_tx_ref_type != "top-up"
+                or current_tx_amount != corrected_amount
+                or current_tx_fee != corrected_fee
+                or current_tx_fee_percentage != user_fee_percentage
+            )
+            if tx_needs_update:
+                execute(
+                    """
+                    UPDATE transactions
+                    SET trans_type = 'in',
+                        trans_amount = ?,
+                        platform_fee = ?,
+                        platform_fee_percentage = ?,
+                        trans_ref_type = 'top-up',
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        corrected_amount,
+                        corrected_fee,
+                        user_fee_percentage,
+                        now,
+                        int(tx_id),
+                    ),
+                )
+
+    orphan_tx_rows = select_all(
+        """
+        SELECT
+          t.id AS tx_id,
+          t.user_id,
+          t.trans_ref,
+          t.trans_type,
+          t.trans_ref_type,
+          t.trans_amount AS tx_amount,
+          t.platform_fee AS tx_platform_fee,
+          t.platform_fee_percentage AS tx_platform_fee_percentage,
+          u.platform_fee_percentage AS user_platform_fee_percentage,
+          tr.id AS request_id,
+          tr.amount AS request_amount,
+          tr.platform_fee AS request_platform_fee
+        FROM transactions t
+        JOIN users u ON u.id = t.user_id
+        LEFT JOIN topup_requests tr
+          ON tr.user_id = t.user_id AND tr.transaction_id = t.trans_ref
+        LEFT JOIN bk_trans_init bti
+          ON bti.user_id = t.user_id AND bti.internal_transaction_ref_number = t.trans_ref
+        WHERE t.trans_ref_type = 'top-up' AND bti.id IS NULL
+        """
+    )
+
+    for row in orphan_tx_rows:
+        user_fee_percentage = _normalize_platform_fee_percentage_value(
+            row.get("user_platform_fee_percentage")
+        )
+        tx_amount = _safe_decimal_value(row.get("tx_amount")) or Decimal("0.00")
+        tx_fee = _safe_decimal_value(row.get("tx_platform_fee")) or Decimal("0.00")
+        request_amount = _safe_decimal_value(row.get("request_amount"))
+        request_fee = _safe_decimal_value(row.get("request_platform_fee"))
+
+        fallback_amount = request_amount if request_amount is not None and request_amount > 0 else tx_amount
+        observed_total = (
+            request_amount + (request_fee if request_fee is not None and request_fee > 0 else Decimal("0.00"))
+        ).quantize(MONEY_QUANT, rounding=ROUND_HALF_UP) if request_amount is not None and request_amount > 0 else (
+            tx_amount + (tx_fee if tx_fee > 0 else Decimal("0.00"))
+        ).quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
+
+        corrected_amount, corrected_fee, _ = _canonical_topup_amounts_from_user_percentage(
+            user_fee_percentage=user_fee_percentage,
+            fallback_amount=fallback_amount,
+            amount=tx_amount,
+            platform_fee=tx_fee,
+            total_charge=observed_total,
+        )
+        if corrected_amount <= 0:
+            continue
+
+        current_tx_fee_percentage = _normalize_platform_fee_percentage_value(
+            row.get("tx_platform_fee_percentage"),
+            default=Decimal("0.00"),
+        )
+        current_tx_type = str(row.get("trans_type") or "").strip().lower()
+        current_tx_ref_type = str(row.get("trans_ref_type") or "").strip().lower()
+        tx_needs_update = (
+            current_tx_type != "in"
+            or current_tx_ref_type != "top-up"
+            or tx_amount != corrected_amount
+            or tx_fee != corrected_fee
+            or current_tx_fee_percentage != user_fee_percentage
+        )
+        if tx_needs_update:
+            execute(
+                """
+                UPDATE transactions
+                SET trans_type = 'in',
+                    trans_amount = ?,
+                    platform_fee = ?,
+                    platform_fee_percentage = ?,
+                    trans_ref_type = 'top-up',
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (corrected_amount, corrected_fee, user_fee_percentage, now, int(row["tx_id"])),
+            )
+        request_id = row.get("request_id")
+        if request_id is not None:
+            current_request_amount = request_amount or Decimal("0.00")
+            current_request_fee = request_fee or Decimal("0.00")
+            if current_request_amount != corrected_amount or current_request_fee != corrected_fee:
+                execute(
+                    """
+                    UPDATE topup_requests
+                    SET amount = ?,
+                        platform_fee = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (corrected_amount, corrected_fee, now, int(request_id)),
+                )
+
+    execute(
+        """
+        UPDATE wallet_balance wb
+        LEFT JOIN (
+          SELECT
+            user_id,
+            COALESCE(SUM(CASE WHEN trans_type = 'in' THEN trans_amount ELSE -trans_amount END), 0.00) AS computed_balance
+          FROM transactions
+          GROUP BY user_id
+        ) tx_totals ON tx_totals.user_id = wb.user_id
+        SET wb.balance = COALESCE(tx_totals.computed_balance, 0.00)
+        """
+    )
 
 
 def payment_gateway_url(path: str) -> str:
@@ -348,9 +720,6 @@ def _schema_is_ready() -> bool:
 def init_db() -> None:
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     if _is_db_marker_current():
-        return
-    if _schema_is_ready():
-        _write_db_marker()
         return
 
     _run_mysql(
@@ -842,6 +1211,8 @@ def init_db() -> None:
         """,
         (utc_now_str(),),
     )
+
+    _reconcile_existing_topup_financials()
 
     execute("DELETE FROM sessions")
     _write_db_marker()
@@ -1478,15 +1849,7 @@ class AdminHandler(BaseHTTPRequestHandler):
         return "pending", normalized_message("pending")
 
     def _safe_decimal(self, value: object) -> Decimal | None:
-        if value is None:
-            return None
-        text = str(value).strip().replace(",", "")
-        if not text:
-            return None
-        try:
-            return Decimal(text).quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
-        except (InvalidOperation, ValueError, TypeError):
-            return None
+        return _safe_decimal_value(value)
 
     def _normalize_platform_fee_percentage(
         self,
@@ -1494,14 +1857,7 @@ class AdminHandler(BaseHTTPRequestHandler):
         *,
         default: Decimal = PLATFORM_FEE_PERCENTAGE_DEFAULT,
     ) -> Decimal:
-        parsed = self._safe_decimal(value)
-        if parsed is None:
-            parsed = default.quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
-        if parsed < PLATFORM_FEE_PERCENTAGE_MIN:
-            return PLATFORM_FEE_PERCENTAGE_MIN
-        if parsed > PLATFORM_FEE_PERCENTAGE_MAX:
-            return PLATFORM_FEE_PERCENTAGE_MAX
-        return parsed.quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
+        return _normalize_platform_fee_percentage_value(value, default=default)
 
     def _get_user_platform_fee_percentage(self, user_id: int) -> Decimal:
         row = select_one(
@@ -1511,10 +1867,31 @@ class AdminHandler(BaseHTTPRequestHandler):
         return self._normalize_platform_fee_percentage((row or {}).get("platform_fee_percentage"))
 
     def _percentage_to_fee(self, amount: Decimal, percentage: Decimal) -> Decimal:
-        normalized_amount = amount.quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
-        normalized_percentage = self._normalize_platform_fee_percentage(percentage)
-        return ((normalized_amount * normalized_percentage) / Decimal("100")).quantize(
-            MONEY_QUANT, rounding=ROUND_HALF_UP
+        return _percentage_to_fee_value(amount, percentage)
+
+    def _net_and_fee_from_total_charge(
+        self,
+        *,
+        total_charge: Decimal,
+        percentage: Decimal,
+    ) -> tuple[Decimal, Decimal]:
+        return _net_and_fee_from_total_charge_value(total_charge, percentage)
+
+    def _recalculate_topup_amounts_for_user_fee(
+        self,
+        *,
+        user_fee_percentage: Decimal,
+        fallback_amount: Decimal | None,
+        gateway_amount: Decimal,
+        gateway_platform_fee: Decimal,
+        gateway_total_charge: Decimal,
+    ) -> tuple[Decimal, Decimal, Decimal]:
+        return _canonical_topup_amounts_from_user_percentage(
+            user_fee_percentage=self._normalize_platform_fee_percentage(user_fee_percentage),
+            fallback_amount=fallback_amount,
+            amount=gateway_amount,
+            platform_fee=gateway_platform_fee,
+            total_charge=gateway_total_charge,
         )
 
     def _infer_platform_fee_percentage(
@@ -1935,19 +2312,22 @@ class AdminHandler(BaseHTTPRequestHandler):
                 max_length=40,
                 default=default_channel_name,
             )
-        payer_code = self._gateway_text_value(
+        gateway_payer_code = self._gateway_text_value(
             details_source,
             {"payer_code"},
             max_length=64,
             default="",
         )
-        if not payer_code:
-            payer_code = self._gateway_text_value(
+        if not gateway_payer_code:
+            gateway_payer_code = self._gateway_text_value(
                 gateway_response,
                 {"payer_code"},
                 max_length=64,
-                default=default_payer_code or str(user_id),
+                default="",
             )
+        if gateway_payer_code and gateway_payer_code.strip() != str(user_id):
+            raise ValueError("This transaction reference is already associated with a different account.")
+        payer_code = gateway_payer_code or default_payer_code or str(user_id)
         payer_names = self._gateway_text_value(
             details_source,
             {"payer_names", "payer_name"},
@@ -1990,16 +2370,15 @@ class AdminHandler(BaseHTTPRequestHandler):
             )
         gateway_tx_id = gateway_tx_id_raw or None
 
-        request_amount = amount if amount > 0 else total_charge
-        if request_amount <= 0 and fallback_amount is not None and fallback_amount > 0:
-            request_amount = fallback_amount.quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
         user_platform_fee_percentage = self._get_user_platform_fee_percentage(user_id)
-        percentage_amount_base = request_amount if request_amount > 0 else amount
-        platform_fee_percentage = self._infer_platform_fee_percentage(
-            amount=percentage_amount_base,
-            platform_fee=platform_fee,
-            fallback=user_platform_fee_percentage,
+        amount, platform_fee, total_charge = self._recalculate_topup_amounts_for_user_fee(
+            user_fee_percentage=user_platform_fee_percentage,
+            fallback_amount=fallback_amount,
+            gateway_amount=amount,
+            gateway_platform_fee=platform_fee,
+            gateway_total_charge=total_charge,
         )
+        platform_fee_percentage = user_platform_fee_percentage
 
         self._upsert_bk_trans_init(
             user_id=user_id,
@@ -2020,18 +2399,18 @@ class AdminHandler(BaseHTTPRequestHandler):
         self._upsert_topup_request(
             user_id=user_id,
             transaction_id=transaction_id,
-            amount=request_amount,
+            amount=amount,
             platform_fee=platform_fee,
             method=method,
             phone=phone_number,
             status=derived_status,
         )
 
-        if derived_status == "success" and request_amount > 0:
+        if derived_status == "success" and amount > 0:
             self._reconcile_topup_transaction(
                 user_id=user_id,
                 transaction_id=transaction_id,
-                amount=request_amount,
+                amount=amount,
                 platform_fee=platform_fee,
                 platform_fee_percentage=platform_fee_percentage,
             )

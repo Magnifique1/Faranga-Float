@@ -3090,7 +3090,7 @@ if (protectedPage) {
         <strong class="session-timeout-countdown">1:00</strong>
         due to inactivity.
       </p>
-      <div class="form-actions session-timeout-actions">
+      <div class="form-actions modal-footer-actions session-timeout-actions">
         <button type="button" class="primary" id="stay-logged-in-button">Stay logged in</button>
       </div>
     </div>
