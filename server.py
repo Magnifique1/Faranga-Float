@@ -1364,16 +1364,25 @@ class AdminHandler(BaseHTTPRequestHandler):
         response_payload = self._extract_gateway_response_payload(gateway_response)
         status_source = response_payload if response_payload is not None else gateway_response
 
-        status_value = self._find_gateway_value(
-            status_source,
-            {"status", "transaction_status", "payment_status"},
-        )
-        raw_status = str(status_value or "").strip().lower()
+        status_keys = {
+            "status",
+            "state",
+            "transaction_status",
+            "payment_status",
+            "tx_status",
+            "txstatus",
+            "transactionstatus",
+            "paymentstatus",
+        }
+        raw_status_candidates = self._collect_gateway_values(status_source, status_keys)
+        if response_payload is not None:
+            raw_status_candidates.extend(self._collect_gateway_values(gateway_response, status_keys))
+        raw_statuses = [str(value or "").strip().lower() for value in raw_status_candidates if str(value or "").strip()]
         message_value = self._find_gateway_value(
             status_source,
             {"message", "status_message", "description"},
         )
-        if message_value in (None, ""):
+        if message_value in (None, "") and response_payload is None:
             message_value = self._find_gateway_value(
                 gateway_response,
                 {"message", "status_message", "description"},
@@ -1394,31 +1403,56 @@ class AdminHandler(BaseHTTPRequestHandler):
             gateway_message = f"{gateway_message}. {reason}".strip(". ").strip()
         gateway_message_lc = gateway_message.lower()
 
-        if raw_status:
-            if any(token in raw_status for token in ("fail", "declin", "error", "cancel")):
-                return "failed", gateway_message or "Transaction Failed"
-            if any(token in raw_status for token in ("success", "complet")):
-                return "success", gateway_message or "Transaction Successful"
-            if any(token in raw_status for token in ("pending", "process", "initiat")):
-                return "pending", gateway_message or "Transaction Pending"
+        def infer_status(text: str, *, allow_success: bool) -> str | None:
+            normalized = text.strip().lower()
+            if not normalized:
+                return None
+            if any(token in normalized for token in ("fail", "declin", "error", "cancel", "reject", "revers")):
+                return "failed"
+            if any(token in normalized for token in ("pending", "process", "initiat", "await", "queue")):
+                return "pending"
+            if allow_success and any(token in normalized for token in ("success", "complet", "approved", "paid")):
+                return "success"
+            return None
 
-        if any(token in gateway_message_lc for token in ("failed", "declined", "error", "cancelled")):
+        inferred_explicit_statuses = [
+            inferred
+            for inferred in (infer_status(candidate, allow_success=True) for candidate in raw_statuses)
+            if inferred is not None
+        ]
+        if "failed" in inferred_explicit_statuses:
             return "failed", gateway_message or "Transaction Failed"
-        if any(token in gateway_message_lc for token in ("successful", "success", "completed")):
+        if "pending" in inferred_explicit_statuses:
+            return "pending", gateway_message or "Transaction Pending"
+        if "success" in inferred_explicit_statuses:
             return "success", gateway_message or "Transaction Successful"
-        if "pending" in gateway_message_lc:
+
+        # Message text is used only for failed/pending. We intentionally do not map generic
+        # "successful" wrapper messages to transaction success.
+        message_status = infer_status(gateway_message_lc, allow_success=False)
+        if message_status == "failed":
+            return "failed", gateway_message or "Transaction Failed"
+        if message_status == "pending":
             return "pending", gateway_message or "Transaction Pending"
 
-        success_flag = self._bool_from_value(
-            self._find_gateway_value(status_source, {"success", "is_success", "ok"})
-        )
-        if success_flag is None:
-            success_flag = self._bool_from_value(
-                self._find_gateway_value(gateway_response, {"success", "is_success", "ok"})
+        # Some gateways expose an explicit transaction boolean inside the transaction payload.
+        transaction_success_flag = self._bool_from_value(
+            self._find_gateway_value(
+                status_source,
+                {"transaction_success", "payment_success", "is_paid", "paid_successfully"},
             )
-        if success_flag is True:
+        )
+        if transaction_success_flag is True:
             return "success", gateway_message or "Transaction Successful"
-        if success_flag is False:
+        if transaction_success_flag is False:
+            return "failed", gateway_message or "Transaction Failed"
+
+        # Do not infer success from generic top-level envelope fields like success=true.
+        scoped_success_values = self._collect_gateway_values(status_source, {"success", "is_success", "ok"})
+        scoped_success_flags = [
+            parsed for parsed in (self._bool_from_value(value) for value in scoped_success_values) if parsed is not None
+        ]
+        if False in scoped_success_flags:
             return "failed", gateway_message or "Transaction Failed"
 
         return "pending", gateway_message or "Transaction Pending"
@@ -1520,6 +1554,45 @@ class AdminHandler(BaseHTTPRequestHandler):
                 if parsed is not None:
                     queue.append(parsed)
         return None
+
+    def _collect_gateway_values(self, payload: object, keys: set[str]) -> list[object]:
+        normalized_keys = {str(key).lower() for key in keys}
+        queue: list[object] = [payload]
+        seen_containers: set[int] = set()
+        matches: list[object] = []
+        while queue:
+            current = queue.pop(0)
+            if isinstance(current, (dict, list)):
+                current_id = id(current)
+                if current_id in seen_containers:
+                    continue
+                seen_containers.add(current_id)
+
+            if isinstance(current, dict):
+                for key, value in current.items():
+                    key_lc = str(key).lower()
+                    if key_lc in normalized_keys and value not in (None, ""):
+                        matches.append(value)
+                    if isinstance(value, (dict, list)):
+                        queue.append(value)
+                    elif isinstance(value, str):
+                        parsed = self._parse_json_container(value)
+                        if parsed is not None:
+                            queue.append(parsed)
+            elif isinstance(current, list):
+                for item in current:
+                    if isinstance(item, (dict, list)):
+                        queue.append(item)
+                    elif isinstance(item, str):
+                        parsed = self._parse_json_container(item)
+                        if parsed is not None:
+                            queue.append(parsed)
+            elif isinstance(current, str):
+                parsed = self._parse_json_container(current)
+                if parsed is not None:
+                    queue.append(parsed)
+
+        return matches
 
     def _extract_gateway_amounts(self, gateway_response: dict) -> tuple[Decimal, Decimal, Decimal]:
         amount_value = self._find_gateway_value(
