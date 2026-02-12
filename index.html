@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Faranga Float · Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Fraunces:wght@600;700&family=Space+Grotesk:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body data-page="dashboard">
+    <div class="app">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">FF</div>
+          <div class="brand-text">
+            <span>Faranga Float</span>
+            <small>Admin Console</small>
+          </div>
+        </div>
+
+        <nav class="nav" aria-label="Primary">
+          <a class="nav-item" data-page="dashboard" href="index.html">Dashboard</a>
+
+          <div class="nav-group">
+            <span class="nav-group-title">Airtime</span>
+            <a
+              class="nav-item"
+              data-page="airtime-recipients"
+              href="airtime-recipients.html"
+            >
+              Airtime Recipients
+            </a>
+            <a
+              class="nav-item"
+              data-page="airtime-schedules"
+              href="airtime-schedules.html"
+            >
+              Airtime Schedule
+            </a>
+          </div>
+
+          <div class="nav-group">
+            <span class="nav-group-title">Funds</span>
+            <a class="nav-item" data-page="funds-recipients" href="funds-recipients.html">
+              Funds Recipients
+            </a>
+            <a class="nav-item" data-page="funds-schedules" href="funds-schedules.html">
+              Funds Schedule
+            </a>
+          </div>
+
+          <a class="nav-item" data-page="wallet" href="wallet.html">Wallet</a>
+          <a class="nav-item" data-page="settings" href="settings.html">Settings</a>
+        </nav>
+
+        <div class="sidebar-footer">
+          <p class="sidebar-user-loading">Loading account...</p>
+        </div>
+      </aside>
+
+      <main class="content">
+        <header class="content-header">
+          <div class="header-copy">
+            <span>Dashboard</span>
+            <h1>Dashboard</h1>
+            <p>
+              Overview of airtime operations, schedules, and wallet activity.
+            </p>
+          </div>
+          <div class="header-actions">
+            <button class="ghost">View activity</button>
+            <button class="primary">New schedule</button>
+          </div>
+        </header>
+
+        <section class="canvas dashboard-quick-actions" aria-live="polite">
+          <div class="canvas-card">
+            <div class="canvas-head">
+              <h2>Quick Actions</h2>
+            </div>
+            <div class="canvas-body">
+              <div class="quick-actions-grid">
+                <a class="quick-action-button" href="airtime-schedules.html">Create New Schedule</a>
+                <a class="quick-action-button" href="wallet.html">Top Up Wallet</a>
+                <a class="quick-action-button" href="airtime-recipients.html">Manage Recipients</a>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="canvas" aria-live="polite">
+          <div class="canvas-card">
+            <div class="canvas-head">
+              <h2>Performance Overview</h2>
+              <span class="tag" id="dashboard-year-tag">This year</span>
+            </div>
+            <div class="canvas-body">
+              <div class="dashboard-grid">
+                <article class="dashboard-panel">
+                  <header class="dashboard-panel-header">
+                    <h3>Month-on-Month Topups</h3>
+                  </header>
+                  <div class="bar-chart" id="topup-bar-chart"></div>
+                </article>
+              </div>
+
+              <div class="dashboard-tabs">
+                <button class="ghost small active-tab" type="button" data-dashboard-tab="airtime">
+                  Airtime
+                </button>
+                <button class="ghost small" type="button" data-dashboard-tab="funds">
+                  Funds
+                </button>
+              </div>
+
+              <section class="dashboard-tab-panel active-panel" data-dashboard-panel="airtime">
+                <div class="dashboard-grid">
+                  <article class="dashboard-panel">
+                    <header class="dashboard-panel-header">
+                      <h3>Month-on-Month Approved Airtime</h3>
+                    </header>
+                    <div class="bar-chart" id="airtime-approved-bar-chart"></div>
+                  </article>
+                </div>
+
+                <article class="dashboard-panel dashboard-panel-table">
+                  <header class="dashboard-panel-header">
+                    <h3>Recipient Airtime by Month</h3>
+                  </header>
+                  <div class="table-wrapper">
+                    <table id="airtime-recipient-monthly-table">
+                      <thead id="airtime-recipient-monthly-head"></thead>
+                      <tbody id="airtime-recipient-monthly-body"></tbody>
+                    </table>
+                  </div>
+                  <div class="empty-state" id="airtime-recipient-monthly-empty">
+                    No approved airtime allocations found for this year.
+                  </div>
+                </article>
+              </section>
+
+              <section class="dashboard-tab-panel" data-dashboard-panel="funds">
+                <div class="dashboard-grid">
+                  <article class="dashboard-panel">
+                    <header class="dashboard-panel-header">
+                      <h3>Month-on-Month Approved Funds</h3>
+                    </header>
+                    <div class="bar-chart" id="funds-approved-bar-chart"></div>
+                  </article>
+                </div>
+
+                <article class="dashboard-panel dashboard-panel-table">
+                  <header class="dashboard-panel-header">
+                    <h3>Recipient Funds by Month</h3>
+                  </header>
+                  <div class="table-wrapper">
+                    <table id="funds-recipient-monthly-table">
+                      <thead id="funds-recipient-monthly-head"></thead>
+                      <tbody id="funds-recipient-monthly-body"></tbody>
+                    </table>
+                  </div>
+                  <div class="empty-state" id="funds-recipient-monthly-empty">
+                    No approved fund allocations found for this year.
+                  </div>
+                </article>
+              </section>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>

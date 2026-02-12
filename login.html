@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Faranga Float · Login</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Fraunces:wght@600;700&family=Space+Grotesk:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body class="auth-page">
+    <div class="auth-shell">
+      <div class="auth-card">
+        <div class="brand">
+          <div class="brand-mark">FF</div>
+          <div class="brand-text">
+            <span>Faranga Float</span>
+            <small>Admin Console</small>
+          </div>
+        </div>
+
+        <div class="auth-header">
+          <h1>Welcome back</h1>
+          <p>Log in to manage airtime schedules, recipients, and wallet activity.</p>
+        </div>
+
+        <form class="auth-form" id="login-form" method="post" action="/login">
+          <label>
+            Email
+            <input type="email" name="email" required placeholder="you@example.com" />
+          </label>
+          <label>
+            Password
+            <input type="password" name="password" required placeholder="Your password" />
+          </label>
+          <div class="auth-message" id="login-message" hidden></div>
+          <button class="primary" type="submit">Log in</button>
+        </form>
+
+        <p class="auth-footer">
+          New here? <a href="signup.html">Create an account</a>
+        </p>
+      </div>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>

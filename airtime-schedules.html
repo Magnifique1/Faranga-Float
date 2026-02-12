@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Faranga Float · Airtime Schedules</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Fraunces:wght@600;700&family=Space+Grotesk:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body data-page="airtime-schedules">
+    <div class="app">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">FF</div>
+          <div class="brand-text">
+            <span>Faranga Float</span>
+            <small>Admin Console</small>
+          </div>
+        </div>
+
+        <nav class="nav" aria-label="Primary">
+          <a class="nav-item" data-page="dashboard" href="index.html">Dashboard</a>
+
+          <div class="nav-group">
+            <span class="nav-group-title">Airtime</span>
+            <a
+              class="nav-item"
+              data-page="airtime-recipients"
+              href="airtime-recipients.html"
+            >
+              Airtime Recipients
+            </a>
+            <a
+              class="nav-item"
+              data-page="airtime-schedules"
+              href="airtime-schedules.html"
+            >
+              Airtime Schedule
+            </a>
+          </div>
+
+          <div class="nav-group">
+            <span class="nav-group-title">Funds</span>
+            <a class="nav-item" data-page="funds-recipients" href="funds-recipients.html">
+              Funds Recipients
+            </a>
+            <a class="nav-item" data-page="funds-schedules" href="funds-schedules.html">
+              Funds Schedule
+            </a>
+          </div>
+
+          <a class="nav-item" data-page="wallet" href="wallet.html">Wallet</a>
+          <a class="nav-item" data-page="settings" href="settings.html">Settings</a>
+        </nav>
+
+        <div class="sidebar-footer">
+          <p class="sidebar-user-loading">Loading account...</p>
+        </div>
+      </aside>
+
+      <main class="content">
+        <header class="content-header">
+          <div class="header-copy">
+            <span>Airtime Schedules</span>
+            <h1>Airtime Schedules</h1>
+            <p>Plan, monitor, and refine upcoming airtime drops.</p>
+          </div>
+          <div class="header-actions">
+            <button class="primary" id="open-schedule-modal">New schedule</button>
+          </div>
+        </header>
+
+        <section class="canvas" aria-live="polite">
+          <div class="schedule-card">
+            <div class="table-header">
+              <div>
+                <h3>Saved schedules</h3>
+                <p>Review upcoming and past airtime schedules.</p>
+              </div>
+              <div class="table-tools">
+                <div class="filter-group" id="schedule-filters">
+                  <button class="ghost small active-filter" data-status="pending">
+                    Pending
+                  </button>
+                  <button class="ghost small" data-status="executed">
+                    Executed
+                  </button>
+                  <button class="ghost small" data-status="deleted">
+                    Deleted
+                  </button>
+                </div>
+                <span class="table-count" id="schedule-count">0 total</span>
+              </div>
+            </div>
+            <div class="table-wrapper">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Date</th>
+                    <th>Description</th>
+                    <th>Recipients</th>
+                    <th>Total Amount</th>
+                    <th>Status</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="schedule-table-body"></tbody>
+              </table>
+            </div>
+            <div class="empty-state" id="schedule-empty">
+              No schedules to show.
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div class="modal" id="schedule-modal" aria-hidden="true">
+      <div class="modal-backdrop" data-close></div>
+      <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="schedule-modal-title">
+        <div class="modal-header">
+          <div>
+            <span class="modal-kicker">New schedule</span>
+            <h2 id="schedule-modal-title">Create airtime schedule</h2>
+          </div>
+          <button class="ghost small" type="button" data-close>Close</button>
+        </div>
+
+        <form id="schedule-form">
+          <div class="form-grid">
+            <label>
+              Schedule date (today)
+              <input type="text" id="schedule-date" name="scheduleDate" readonly required />
+            </label>
+            <label>
+              Schedule Description
+              <input
+                type="text"
+                id="schedule-description"
+                name="scheduleDescription"
+                placeholder="e.g., Monthly top-up for sales team"
+                required
+              />
+            </label>
+          </div>
+
+          <section class="picker-section">
+            <div class="picker-header">
+              <div>
+                <h3>Select recipients</h3>
+                <p>Search and add as many recipients as needed.</p>
+              </div>
+              <label class="search-field">
+                <span>Search</span>
+                <input
+                  type="search"
+                  id="schedule-recipient-search"
+                  placeholder="Search by name, phone, or carrier"
+                  autocomplete="off"
+                />
+              </label>
+            </div>
+
+            <div class="picker-grid">
+              <div class="picker-panel">
+                <h4>Available recipients</h4>
+                <div class="picker-list" id="schedule-recipient-list"></div>
+              </div>
+              <div class="picker-panel">
+                <div class="picker-panel-header">
+                  <h4>Selected recipients</h4>
+                  <span class="total-pill" id="schedule-total">Total: 0</span>
+                </div>
+                <div class="picker-list" id="schedule-selected-list"></div>
+              </div>
+            </div>
+          </section>
+
+          <div class="form-actions">
+            <button class="ghost" type="button" data-close>Cancel</button>
+            <button class="primary" type="submit">Save schedule</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <div class="modal" id="schedule-approve-modal" aria-hidden="true">
+      <div class="modal-backdrop" data-close></div>
+      <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="approve-modal-title">
+        <div class="modal-header">
+          <div>
+            <span class="modal-kicker">Approve schedule</span>
+            <h2 id="approve-modal-title">Review and approve</h2>
+          </div>
+          <button class="ghost small" type="button" data-close>Close</button>
+        </div>
+
+        <div class="schedule-summary">
+          <div>
+            <span class="summary-label">Date</span>
+            <strong id="approve-date">-</strong>
+          </div>
+          <div>
+            <span class="summary-label">Description</span>
+            <strong id="approve-desc">-</strong>
+          </div>
+          <div>
+            <span class="summary-label">Recipients</span>
+            <strong id="approve-total-recipients">0</strong>
+          </div>
+          <div>
+            <span class="summary-label">Total amount</span>
+            <strong id="approve-total-amount">0</strong>
+          </div>
+        </div>
+
+        <div class="table-wrapper">
+          <table>
+            <thead>
+              <tr>
+                <th>Recipient</th>
+                <th>Phone</th>
+                <th>Carrier</th>
+                <th>Airtime Amount</th>
+              </tr>
+            </thead>
+            <tbody id="approve-recipient-body"></tbody>
+          </table>
+        </div>
+
+        <div class="form-actions">
+          <button class="ghost" type="button" data-close>Close</button>
+          <button class="danger" type="button" id="approve-delete">Delete</button>
+          <button class="primary" type="button" id="approve-confirm">Approve</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal" id="schedule-edit-modal" aria-hidden="true">
+      <div class="modal-backdrop" data-close-edit></div>
+      <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="edit-modal-title">
+        <div class="modal-header">
+          <div>
+            <span class="modal-kicker">Edit schedule amounts</span>
+            <h2 id="edit-modal-title">Update airtime amounts</h2>
+          </div>
+          <button class="ghost small" type="button" data-close-edit>Close</button>
+        </div>
+
+        <form id="schedule-edit-form">
+          <div class="schedule-summary">
+            <div>
+              <span class="summary-label">Date</span>
+              <strong id="edit-date">-</strong>
+            </div>
+            <div>
+              <span class="summary-label">Description</span>
+              <strong id="edit-desc">-</strong>
+            </div>
+            <div>
+              <span class="summary-label">Recipients</span>
+              <strong id="edit-total-recipients">0</strong>
+            </div>
+            <div>
+              <span class="summary-label">Total amount</span>
+              <strong id="edit-total-amount">0</strong>
+            </div>
+          </div>
+
+          <div class="schedule-edit-list" id="schedule-edit-list"></div>
+
+          <div class="form-actions">
+            <button class="ghost" type="button" data-close-edit>Cancel</button>
+            <button class="primary" type="submit" id="schedule-edit-save">Save amounts</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>

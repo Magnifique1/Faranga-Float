@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Faranga Float · Settings</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Fraunces:wght@600;700&family=Space+Grotesk:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body data-page="settings">
+    <div class="app">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">FF</div>
+          <div class="brand-text">
+            <span>Faranga Float</span>
+            <small>Admin Console</small>
+          </div>
+        </div>
+
+        <nav class="nav" aria-label="Primary">
+          <a class="nav-item" data-page="dashboard" href="index.html">Dashboard</a>
+
+          <div class="nav-group">
+            <span class="nav-group-title">Airtime</span>
+            <a
+              class="nav-item"
+              data-page="airtime-recipients"
+              href="airtime-recipients.html"
+            >
+              Airtime Recipients
+            </a>
+            <a
+              class="nav-item"
+              data-page="airtime-schedules"
+              href="airtime-schedules.html"
+            >
+              Airtime Schedule
+            </a>
+          </div>
+
+          <div class="nav-group">
+            <span class="nav-group-title">Funds</span>
+            <a class="nav-item" data-page="funds-recipients" href="funds-recipients.html">
+              Funds Recipients
+            </a>
+            <a class="nav-item" data-page="funds-schedules" href="funds-schedules.html">
+              Funds Schedule
+            </a>
+          </div>
+
+          <a class="nav-item" data-page="wallet" href="wallet.html">Wallet</a>
+          <a class="nav-item" data-page="settings" href="settings.html">Settings</a>
+        </nav>
+
+        <div class="sidebar-footer">
+          <p class="sidebar-user-loading">Loading account...</p>
+        </div>
+      </aside>
+
+      <main class="content">
+        <header class="content-header">
+          <div class="header-copy">
+            <span>Settings</span>
+            <h1>Settings</h1>
+            <p>Manage account security settings.</p>
+          </div>
+        </header>
+
+        <section class="canvas" aria-live="polite">
+          <div class="canvas-card">
+            <div class="canvas-head">
+              <h2>Update Password</h2>
+              <span class="tag">Security</span>
+            </div>
+            <div class="canvas-body">
+              <form id="password-update-form" class="settings-form">
+                <label>
+                  Current Password
+                  <input
+                    type="password"
+                    id="current-password"
+                    name="currentPassword"
+                    autocomplete="current-password"
+                    required
+                  />
+                </label>
+                <label>
+                  New Password
+                  <input
+                    type="password"
+                    id="new-password"
+                    name="newPassword"
+                    minlength="6"
+                    autocomplete="new-password"
+                    required
+                  />
+                </label>
+                <label>
+                  Confirm New Password
+                  <input
+                    type="password"
+                    id="confirm-new-password"
+                    name="confirmNewPassword"
+                    minlength="6"
+                    autocomplete="new-password"
+                    required
+                  />
+                </label>
+
+                <div id="password-update-feedback" class="auth-message" hidden></div>
+
+                <div class="form-actions">
+                  <button type="submit" class="primary" id="password-update-submit">
+                    Update Password
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>

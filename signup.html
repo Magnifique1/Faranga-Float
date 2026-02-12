@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Faranga Float · Sign up</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Fraunces:wght@600;700&family=Space+Grotesk:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body class="auth-page">
+    <div class="auth-shell">
+      <div class="auth-card">
+        <div class="brand">
+          <div class="brand-mark">FF</div>
+          <div class="brand-text">
+            <span>Faranga Float</span>
+            <small>Admin Console</small>
+          </div>
+        </div>
+
+        <div class="auth-header">
+          <h1>Create your account</h1>
+          <p>Choose your account type and upload the required documentation.</p>
+        </div>
+
+        <form class="auth-form" id="signup-form" method="post" action="/signup" enctype="multipart/form-data">
+          <fieldset class="account-type">
+            <legend>Account type</legend>
+            <label>
+              <input type="radio" name="account_type" value="individual" checked />
+              Individual
+            </label>
+            <label>
+              <input type="radio" name="account_type" value="business" />
+              Business
+            </label>
+          </fieldset>
+
+          <div class="form-grid" data-account="individual">
+            <label>
+              Name
+              <input type="text" name="name" required placeholder="Full name" />
+            </label>
+            <label>
+              Email
+              <input type="email" name="email" required placeholder="you@example.com" />
+            </label>
+            <label>
+              Phone
+              <input type="tel" name="phone" required placeholder="+2507XXXXXXXX" />
+            </label>
+            <label>
+              Attachment of National ID
+              <input type="file" name="national_id" required accept="image/*,.pdf" />
+            </label>
+          </div>
+
+          <div class="form-grid" data-account="business" hidden>
+            <label>
+              Business Name
+              <input type="text" name="business_name" placeholder="Business name" />
+            </label>
+            <label>
+              Business Email
+              <input type="email" name="business_email" placeholder="business@example.com" />
+            </label>
+            <label>
+              Business Registration Number
+              <input type="text" name="business_reg_no" placeholder="Registration number" />
+            </label>
+            <label>
+              Attachment of Business Registration
+              <input type="file" name="business_registration" accept="image/*,.pdf" />
+            </label>
+          </div>
+
+          <label>
+            Password
+            <input type="password" name="password" required placeholder="Create a password" />
+          </label>
+          <label>
+            Confirm Password
+            <input type="password" name="confirm_password" required placeholder="Repeat your password" />
+          </label>
+          <div class="auth-message" id="signup-message" hidden></div>
+          <button class="primary" type="submit">Create account</button>
+        </form>
+
+        <p class="auth-footer">
+          Already have an account? <a href="login.html">Log in</a>
+        </p>
+      </div>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>

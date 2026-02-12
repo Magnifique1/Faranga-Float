@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Faranga Float · Wallet</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Fraunces:wght@600;700&family=Space+Grotesk:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body data-page="wallet">
+    <div class="app">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">FF</div>
+          <div class="brand-text">
+            <span>Faranga Float</span>
+            <small>Admin Console</small>
+          </div>
+        </div>
+
+        <nav class="nav" aria-label="Primary">
+          <a class="nav-item" data-page="dashboard" href="index.html">Dashboard</a>
+
+          <div class="nav-group">
+            <span class="nav-group-title">Airtime</span>
+            <a
+              class="nav-item"
+              data-page="airtime-recipients"
+              href="airtime-recipients.html"
+            >
+              Airtime Recipients
+            </a>
+            <a
+              class="nav-item"
+              data-page="airtime-schedules"
+              href="airtime-schedules.html"
+            >
+              Airtime Schedule
+            </a>
+          </div>
+
+          <div class="nav-group">
+            <span class="nav-group-title">Funds</span>
+            <a class="nav-item" data-page="funds-recipients" href="funds-recipients.html">
+              Funds Recipients
+            </a>
+            <a class="nav-item" data-page="funds-schedules" href="funds-schedules.html">
+              Funds Schedule
+            </a>
+          </div>
+
+          <a class="nav-item" data-page="wallet" href="wallet.html">Wallet</a>
+          <a class="nav-item" data-page="settings" href="settings.html">Settings</a>
+        </nav>
+
+        <div class="sidebar-footer">
+          <p class="sidebar-user-loading">Loading account...</p>
+        </div>
+      </aside>
+
+      <main class="content">
+        <header class="content-header">
+          <div class="header-copy">
+            <span>Wallet</span>
+            <h1>Wallet</h1>
+            <p>Track balances, top-ups, and payout movement.</p>
+          </div>
+          <div class="header-actions">
+            <button class="primary" id="open-topup-modal">Top up wallet</button>
+          </div>
+        </header>
+
+        <section class="canvas" aria-live="polite">
+          <div class="canvas-card">
+            <div class="canvas-head">
+              <h2>Wallet overview</h2>
+              <span class="tag">Live</span>
+            </div>
+            <div class="canvas-body">
+              <div class="wallet-summary">
+                <div class="wallet-tile">
+                  <span class="summary-label">Current balance</span>
+                  <strong id="wallet-balance">0</strong>
+                </div>
+                <div class="wallet-tile">
+                  <span class="summary-label">Total in</span>
+                  <strong id="wallet-total-in">0</strong>
+                </div>
+                <div class="wallet-tile">
+                  <span class="summary-label">Total out</span>
+                  <strong id="wallet-total-out">0</strong>
+                </div>
+              </div>
+
+              <div class="wallet-transactions">
+                <div class="table-header">
+                  <div>
+                    <h3>Recent transactions</h3>
+                    <p>Latest topups and schedule deductions.</p>
+                  </div>
+                </div>
+                <div id="wallet-transactions-groups"></div>
+                <div class="empty-state" id="wallet-transactions-empty">
+                  No transactions yet.
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div class="modal" id="topup-modal" aria-hidden="true">
+      <div class="modal-backdrop"></div>
+      <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="topup-modal-title">
+        <div class="modal-header">
+          <div>
+            <span class="modal-kicker">Wallet top up</span>
+            <h2 id="topup-modal-title">Add funds to your wallet</h2>
+          </div>
+          <button class="ghost small" type="button" data-close>Close</button>
+        </div>
+
+        <form id="topup-form">
+          <div class="form-grid">
+            <label>
+              Topup amount
+              <input
+                type="number"
+                id="topup-amount"
+                name="topupAmount"
+                min="1"
+                step="1"
+                placeholder="Enter amount"
+                required
+              />
+            </label>
+            <label>
+              Topup payment method
+              <select id="topup-method" name="topupMethod" required>
+                <option value="Mobile Money - MTN" selected>Mobile Money - MTN</option>
+                <option value="Mobile Money - Airtel">Mobile Money - Airtel</option>
+              </select>
+            </label>
+            <label>
+              Phone number
+              <input
+                type="tel"
+                id="topup-phone"
+                name="topupPhone"
+                placeholder="2507XXXXXXXX"
+                inputmode="numeric"
+                pattern="250[0-9]{9}"
+                maxlength="12"
+                required
+              />
+            </label>
+          </div>
+
+          <div class="topup-summary">
+            <div>
+              <span class="summary-label">Platform fee (10%)</span>
+              <strong id="topup-fee">0</strong>
+            </div>
+            <div>
+              <span class="summary-label">Total to charge</span>
+              <strong id="topup-total">0</strong>
+            </div>
+            <div>
+              <span class="summary-label">Wallet credit</span>
+              <strong id="topup-credit">0</strong>
+            </div>
+          </div>
+
+          <div class="topup-method">
+            <div class="method-header">
+              <h3>Mobile Money charge</h3>
+              <p>We will send this amount to the payment gateway for charging.</p>
+            </div>
+            <p class="method-note">
+              Only the topup amount is credited to the wallet. Platform fee is charged separately.
+            </p>
+          </div>
+
+          <div class="form-actions">
+            <button class="ghost" type="button" data-close>Cancel</button>
+            <button class="primary" type="submit">Top up</button>
+          </div>
+        </form>
+
+        <div class="modal-loader" id="topup-loader" hidden>
+          <div class="upload-spinner" aria-hidden="true"></div>
+          <p id="topup-loader-text">Processing payment...</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal" id="topup-result-modal" aria-hidden="true">
+      <div class="modal-backdrop"></div>
+      <div
+        class="modal-card modal-card-compact"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="topup-result-title"
+      >
+        <div class="modal-header">
+          <div>
+            <span class="modal-kicker">Wallet top up</span>
+            <h2 id="topup-result-title">Top up complete</h2>
+          </div>
+          <button class="ghost small" type="button" data-close>Close</button>
+        </div>
+        <p id="topup-result-message">
+          Your wallet has been updated.
+        </p>
+        <div class="form-actions">
+          <button class="primary" type="button" data-close>Done</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>

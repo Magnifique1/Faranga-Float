@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Faranga Float · Funds Recipients</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Fraunces:wght@600;700&family=Space+Grotesk:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body data-page="funds-recipients">
+    <div class="app">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">FF</div>
+          <div class="brand-text">
+            <span>Faranga Float</span>
+            <small>Admin Console</small>
+          </div>
+        </div>
+
+        <nav class="nav" aria-label="Primary">
+          <a class="nav-item" data-page="dashboard" href="index.html">Dashboard</a>
+
+          <div class="nav-group">
+            <span class="nav-group-title">Airtime</span>
+            <a
+              class="nav-item"
+              data-page="airtime-recipients"
+              href="airtime-recipients.html"
+            >
+              Airtime Recipients
+            </a>
+            <a
+              class="nav-item"
+              data-page="airtime-schedules"
+              href="airtime-schedules.html"
+            >
+              Airtime Schedule
+            </a>
+          </div>
+
+          <div class="nav-group">
+            <span class="nav-group-title">Funds</span>
+            <a class="nav-item" data-page="funds-recipients" href="funds-recipients.html">
+              Funds Recipients
+            </a>
+            <a class="nav-item" data-page="funds-schedules" href="funds-schedules.html">
+              Funds Schedule
+            </a>
+          </div>
+
+          <a class="nav-item" data-page="wallet" href="wallet.html">Wallet</a>
+          <a class="nav-item" data-page="settings" href="settings.html">Settings</a>
+        </nav>
+
+        <div class="sidebar-footer">
+          <p class="sidebar-user-loading">Loading account...</p>
+        </div>
+      </aside>
+
+      <main class="content">
+        <header class="content-header">
+          <div class="header-copy">
+            <span>Funds</span>
+            <h1>Funds Recipients</h1>
+            <p>Manage who receives funds and segment their activity.</p>
+          </div>
+          <div class="header-actions">
+            <button class="ghost" id="open-funds-recipient-upload-modal">
+              Upload recipients from CSV
+            </button>
+            <button class="primary">New recipient</button>
+          </div>
+        </header>
+
+        <section class="canvas" aria-live="polite">
+          <div class="recipients-layout">
+            <form class="recipient-form" id="funds-recipient-form">
+              <div class="form-header">
+                <h3 id="funds-recipient-form-title">New recipient</h3>
+                <p id="funds-recipient-form-subtitle">
+                  Add someone who should receive funds.
+                </p>
+              </div>
+              <div class="form-grid">
+                <label>
+                  Full Name
+                  <input
+                    type="text"
+                    id="funds-recipient-name"
+                    name="fullName"
+                    placeholder="Jane Doe"
+                    required
+                  />
+                </label>
+                <label>
+                  Phone Number
+                  <input
+                    type="tel"
+                    id="funds-recipient-phone"
+                    name="phoneNumber"
+                    placeholder="+2507XXXXXXXX"
+                    pattern="\+250\d{9}"
+                    maxlength="13"
+                    inputmode="numeric"
+                    title="Use the Rwanda format: +250 followed by 9 digits."
+                    required
+                  />
+                </label>
+                <label>
+                  Phone Carrier
+                  <select id="funds-recipient-carrier" name="carrier" required>
+                    <option value="MTN" selected>MTN</option>
+                    <option value="Airtel">Airtel</option>
+                  </select>
+                </label>
+              </div>
+              <div class="form-actions">
+                <button type="submit" class="primary" id="funds-recipient-submit">
+                  Add recipient
+                </button>
+                <button
+                  type="button"
+                  class="ghost"
+                  id="funds-recipient-cancel"
+                  hidden
+                >
+                  Cancel edit
+                </button>
+              </div>
+            </form>
+
+            <div class="recipient-table-card">
+              <div class="table-header">
+                <div>
+                  <h3>Recipients</h3>
+                  <p>All recipients added for fund distribution.</p>
+                </div>
+                <div class="table-tools">
+                  <label class="search-field">
+                    <span>Search</span>
+                    <input
+                      type="search"
+                      id="funds-recipient-search"
+                      placeholder="Search by name, phone, or carrier"
+                      autocomplete="off"
+                    />
+                  </label>
+                  <label class="page-size">
+                    <span>Rows</span>
+                    <select id="funds-recipient-page-size">
+                      <option value="5">5</option>
+                      <option value="8" selected>8</option>
+                      <option value="12">12</option>
+                    </select>
+                  </label>
+                  <span class="table-count" id="funds-recipient-count">0 total</span>
+                </div>
+              </div>
+              <div class="table-wrapper">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Full Name</th>
+                      <th>Phone Number</th>
+                      <th>Carrier</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody id="funds-recipient-table-body"></tbody>
+                </table>
+              </div>
+              <div class="empty-state" id="funds-recipient-empty">
+                No recipients yet.
+              </div>
+              <div class="pagination" id="funds-recipient-pagination"></div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div class="modal" id="funds-recipient-upload-modal" aria-hidden="true">
+      <div class="modal-backdrop" data-close></div>
+      <div
+        class="modal-card modal-card-compact"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="funds-recipient-upload-modal-title"
+      >
+        <div class="modal-header">
+          <div>
+            <span class="modal-kicker">CSV upload</span>
+            <h2 id="funds-recipient-upload-modal-title">Upload recipients from CSV</h2>
+          </div>
+          <button class="ghost small" type="button" data-close>Close</button>
+        </div>
+
+        <form id="funds-recipient-upload-form">
+          <p class="modal-copy">
+            Download the CSV template first, then populate your data using
+            these headers: Name, Phone Number, Carier. Phone numbers should be
+            local format (7XXXXXXXX), and we will automatically add +250.
+            Maximum upload size is 50 records.
+          </p>
+
+          <div class="form-actions">
+            <button
+              class="ghost"
+              type="button"
+              id="funds-download-recipient-template"
+            >
+              Download template file
+            </button>
+          </div>
+
+          <div class="form-grid modal-upload-grid">
+            <label>
+              CSV file
+              <input
+                type="file"
+                id="funds-recipient-upload-file"
+                name="recipientUploadFile"
+                accept=".csv,text/csv"
+                required
+              />
+            </label>
+          </div>
+
+          <div
+            class="upload-feedback"
+            id="funds-recipient-upload-feedback"
+            role="alert"
+            hidden
+          ></div>
+
+          <div
+            class="upload-processing"
+            id="funds-recipient-upload-processing"
+            aria-live="polite"
+            hidden
+          >
+            <span class="upload-spinner" aria-hidden="true"></span>
+            <span>Processing upload records...</span>
+          </div>
+
+          <div class="form-actions">
+            <button type="button" class="ghost" data-close>Cancel</button>
+            <button type="submit" class="primary" id="funds-recipient-upload-submit">
+              Upload recipients
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>

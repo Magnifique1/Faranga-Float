@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Bulk Funds Admin · Funds Schedule</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Fraunces:wght@600;700&family=Space+Grotesk:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body data-page="funds-schedules">
+    <div class="app">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">FF</div>
+          <div class="brand-text">
+            <span>Bulk Funds</span>
+            <small>Admin Console</small>
+          </div>
+        </div>
+
+        <nav class="nav" aria-label="Primary">
+          <a class="nav-item" data-page="dashboard" href="index.html">Dashboard</a>
+
+          <div class="nav-group">
+            <span class="nav-group-title">Airtime</span>
+            <a
+              class="nav-item"
+              data-page="airtime-recipients"
+              href="airtime-recipients.html"
+            >
+              Airtime Recipients
+            </a>
+            <a
+              class="nav-item"
+              data-page="airtime-schedules"
+              href="airtime-schedules.html"
+            >
+              Airtime Schedule
+            </a>
+          </div>
+
+          <div class="nav-group">
+            <span class="nav-group-title">Funds</span>
+            <a class="nav-item" data-page="funds-recipients" href="funds-recipients.html">
+              Funds Recipients
+            </a>
+            <a class="nav-item" data-page="funds-schedules" href="funds-schedules.html">
+              Funds Schedule
+            </a>
+          </div>
+
+          <a class="nav-item" data-page="wallet" href="wallet.html">Wallet</a>
+          <a class="nav-item" data-page="settings" href="settings.html">Settings</a>
+        </nav>
+
+        <div class="sidebar-footer">
+          <p class="sidebar-user-loading">Loading account...</p>
+        </div>
+      </aside>
+
+      <main class="content">
+        <header class="content-header">
+          <div class="header-copy">
+            <span>Funds Schedule</span>
+            <h1>Funds Schedule</h1>
+            <p>Plan, monitor, and refine upcoming fund disbursements.</p>
+          </div>
+          <div class="header-actions">
+            <button class="primary" id="open-funds-schedule-modal">New schedule</button>
+          </div>
+        </header>
+
+        <section class="canvas" aria-live="polite">
+          <div class="schedule-card">
+            <div class="table-header">
+              <div>
+                <h3>Saved schedules</h3>
+                <p>Review upcoming and past fund schedules.</p>
+              </div>
+              <div class="table-tools">
+                <div class="filter-group" id="funds-schedule-filters">
+                  <button class="ghost small active-filter" data-status="pending">
+                    Pending
+                  </button>
+                  <button class="ghost small" data-status="executed">
+                    Executed
+                  </button>
+                  <button class="ghost small" data-status="deleted">
+                    Deleted
+                  </button>
+                </div>
+                <span class="table-count" id="funds-schedule-count">0 total</span>
+              </div>
+            </div>
+            <div class="table-wrapper">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Date</th>
+                    <th>Description</th>
+                    <th>Recipients</th>
+                    <th>Total Amount</th>
+                    <th>Status</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="funds-schedule-table-body"></tbody>
+              </table>
+            </div>
+            <div class="empty-state" id="funds-schedule-empty">
+              No schedules to show.
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div class="modal" id="funds-schedule-modal" aria-hidden="true">
+      <div class="modal-backdrop" data-close></div>
+      <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="funds-schedule-modal-title">
+        <div class="modal-header">
+          <div>
+            <span class="modal-kicker">New schedule</span>
+            <h2 id="funds-schedule-modal-title">Create funds schedule</h2>
+          </div>
+          <button class="ghost small" type="button" data-close>Close</button>
+        </div>
+
+        <form id="funds-schedule-form">
+          <div class="form-grid">
+            <label>
+              Schedule date (today)
+              <input type="text" id="funds-schedule-date" name="scheduleDate" readonly required />
+            </label>
+            <label>
+              Schedule Description
+              <input
+                type="text"
+                id="funds-schedule-description"
+                name="scheduleDescription"
+                placeholder="e.g., Monthly top-up for sales team"
+                required
+              />
+            </label>
+          </div>
+
+          <section class="picker-section">
+            <div class="picker-header">
+              <div>
+                <h3>Select recipients</h3>
+                <p>Search and add as many recipients as needed.</p>
+              </div>
+              <label class="search-field">
+                <span>Search</span>
+                <input
+                  type="search"
+                  id="funds-schedule-recipient-search"
+                  placeholder="Search by name, phone, or carrier"
+                  autocomplete="off"
+                />
+              </label>
+            </div>
+
+            <div class="picker-grid">
+              <div class="picker-panel">
+                <h4>Available recipients</h4>
+                <div class="picker-list" id="funds-schedule-recipient-list"></div>
+              </div>
+              <div class="picker-panel">
+                <div class="picker-panel-header">
+                  <h4>Selected recipients</h4>
+                  <span class="total-pill" id="funds-schedule-total">Total: 0</span>
+                </div>
+                <div class="picker-list" id="funds-schedule-selected-list"></div>
+              </div>
+            </div>
+          </section>
+
+          <div class="form-actions">
+            <button class="ghost" type="button" data-close>Cancel</button>
+            <button class="primary" type="submit">Save schedule</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <div class="modal" id="funds-schedule-approve-modal" aria-hidden="true">
+      <div class="modal-backdrop" data-close></div>
+      <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="funds-approve-modal-title">
+        <div class="modal-header">
+          <div>
+            <span class="modal-kicker">Approve schedule</span>
+            <h2 id="funds-approve-modal-title">Review and approve</h2>
+          </div>
+          <button class="ghost small" type="button" data-close>Close</button>
+        </div>
+
+        <div class="schedule-summary">
+          <div>
+            <span class="summary-label">Date</span>
+            <strong id="funds-approve-date">-</strong>
+          </div>
+          <div>
+            <span class="summary-label">Description</span>
+            <strong id="funds-approve-desc">-</strong>
+          </div>
+          <div>
+            <span class="summary-label">Recipients</span>
+            <strong id="funds-approve-total-recipients">0</strong>
+          </div>
+          <div>
+            <span class="summary-label">Total amount</span>
+            <strong id="funds-approve-total-amount">0</strong>
+          </div>
+        </div>
+
+        <div class="table-wrapper">
+          <table>
+            <thead>
+              <tr>
+                <th>Recipient</th>
+                <th>Phone</th>
+                <th>Carrier</th>
+                <th>Funds Amount</th>
+              </tr>
+            </thead>
+            <tbody id="funds-approve-recipient-body"></tbody>
+          </table>
+        </div>
+
+        <div class="form-actions">
+          <button class="ghost" type="button" data-close>Close</button>
+          <button class="danger" type="button" id="funds-approve-delete">Delete</button>
+          <button class="primary" type="button" id="funds-approve-confirm">Approve</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal" id="funds-schedule-edit-modal" aria-hidden="true">
+      <div class="modal-backdrop" data-close-edit></div>
+      <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="funds-edit-modal-title">
+        <div class="modal-header">
+          <div>
+            <span class="modal-kicker">Edit schedule amounts</span>
+            <h2 id="funds-edit-modal-title">Update funds amounts</h2>
+          </div>
+          <button class="ghost small" type="button" data-close-edit>Close</button>
+        </div>
+
+        <form id="funds-schedule-edit-form">
+          <div class="schedule-summary">
+            <div>
+              <span class="summary-label">Date</span>
+              <strong id="funds-edit-date">-</strong>
+            </div>
+            <div>
+              <span class="summary-label">Description</span>
+              <strong id="funds-edit-desc">-</strong>
+            </div>
+            <div>
+              <span class="summary-label">Recipients</span>
+              <strong id="funds-edit-total-recipients">0</strong>
+            </div>
+            <div>
+              <span class="summary-label">Total amount</span>
+              <strong id="funds-edit-total-amount">0</strong>
+            </div>
+          </div>
+
+          <div class="schedule-edit-list" id="funds-schedule-edit-list"></div>
+
+          <div class="form-actions">
+            <button class="ghost" type="button" data-close-edit>Cancel</button>
+            <button class="primary" type="submit" id="funds-schedule-edit-save">Save amounts</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>
