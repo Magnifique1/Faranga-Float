@@ -1381,16 +1381,6 @@ if (scheduleModal) {
     button.addEventListener("click", closeModal);
   });
 
-  topupResultCloseButtons.forEach((button) => {
-    button.addEventListener("click", closeResultModal);
-  });
-
-  topupResultModal?.addEventListener("click", (event) => {
-    if (event.target.classList.contains("modal-backdrop")) {
-      closeResultModal();
-    }
-  });
-
   if (approveModal) {
     const approveCloseButtons = approveModal.querySelectorAll("[data-close]");
     approveCloseButtons.forEach((button) => {
@@ -2408,6 +2398,8 @@ if (topupModal) {
   const walletBalanceEl = document.getElementById("wallet-balance");
   const walletTotalInEl = document.getElementById("wallet-total-in");
   const walletTotalOutEl = document.getElementById("wallet-total-out");
+  const walletPendingInitBodyEl = document.getElementById("wallet-pending-init-body");
+  const walletPendingInitEmptyEl = document.getElementById("wallet-pending-init-empty");
   const walletTransactionGroupsEl = document.getElementById("wallet-transactions-groups");
   const walletEmptyState = document.getElementById("wallet-transactions-empty");
   const topupLoader = document.getElementById("topup-loader");
@@ -2419,8 +2411,7 @@ if (topupModal) {
   const submitButton = topupForm?.querySelector("button[type='submit']");
   let isSubmittingTopup = false;
   const phonePattern = /^250\d{9}$/;
-  let statusTimer = null;
-  let activeTopupId = null;
+  const validatingPendingTransactions = new Set();
 
   const formatAmount = (value) => {
     const amount = Number(value) || 0;
@@ -2439,13 +2430,6 @@ if (topupModal) {
     feeEl.textContent = formatAmount(fee);
     totalEl.textContent = formatAmount(total);
     creditEl.textContent = formatAmount(amount);
-  };
-
-  const stopStatusPolling = () => {
-    if (statusTimer) {
-      clearInterval(statusTimer);
-      statusTimer = null;
-    }
   };
 
   const setTopupLoading = (isLoading, message) => {
@@ -2468,6 +2452,7 @@ if (topupModal) {
     if (!topupResultModal) return;
     if (topupResultTitle) topupResultTitle.textContent = title;
     if (topupResultMessage) topupResultMessage.textContent = message;
+    topupResultModal.hidden = false;
     topupResultModal.classList.add("active");
     topupResultModal.setAttribute("aria-hidden", "false");
   };
@@ -2476,13 +2461,15 @@ if (topupModal) {
     if (!topupResultModal) return;
     topupResultModal.classList.remove("active");
     topupResultModal.setAttribute("aria-hidden", "true");
-    stopStatusPolling();
-    activeTopupId = null;
+    topupResultModal.hidden = true;
   };
 
   const renderWallet = (payload) => {
     const transactions = Array.isArray(payload.transactions)
       ? payload.transactions
+      : [];
+    const pendingInitializations = Array.isArray(payload.pending_initializations)
+      ? payload.pending_initializations
       : [];
     const totalIn = transactions
       .filter((tx) => tx.trans_type === "in")
@@ -2494,6 +2481,42 @@ if (topupModal) {
     if (walletBalanceEl) walletBalanceEl.textContent = formatAmount(payload.balance || 0);
     if (walletTotalInEl) walletTotalInEl.textContent = formatAmount(totalIn);
     if (walletTotalOutEl) walletTotalOutEl.textContent = formatAmount(totalOut);
+
+    if (walletPendingInitBodyEl) {
+      walletPendingInitBodyEl.innerHTML = pendingInitializations
+        .map((item) => {
+          const isValidating = validatingPendingTransactions.has(Number(item.id));
+          return `
+            <tr>
+              <td>${item.internal_transaction_ref_number}</td>
+              <td>${formatAmount(item.amount)}</td>
+              <td>${formatAmount(item.platform_fee)}</td>
+              <td>${formatAmount(item.total_charge)}</td>
+              <td>${item.method}</td>
+              <td>${item.phone_number}</td>
+              <td>${item.created_at}</td>
+              <td>
+                <button
+                  type="button"
+                  class="primary small"
+                  data-action="validate-pending"
+                  data-id="${item.id}"
+                  data-transaction-id="${item.internal_transaction_ref_number}"
+                  ${isValidating ? "disabled" : ""}
+                >
+                  ${isValidating ? "Validating..." : "Validate"}
+                </button>
+              </td>
+            </tr>
+          `;
+        })
+        .join("");
+    }
+
+    if (walletPendingInitEmptyEl) {
+      walletPendingInitEmptyEl.style.display =
+        pendingInitializations.length === 0 ? "block" : "none";
+    }
 
     if (!walletTransactionGroupsEl) return;
     const monthFormatter = new Intl.DateTimeFormat("en-US", {
@@ -2611,48 +2634,14 @@ if (topupModal) {
     return parseApiResponse(response, "Unable to check transaction status.");
   };
 
-  let isCheckingStatus = false;
-
-  const handleTopupCompletion = (statusPayload) => {
-    const status = statusPayload?.status;
-    if (status === "success") {
-      closeModal({ force: true });
-      openResultModal("Top up successful", statusPayload?.message || "Your wallet has been credited.");
-      loadWallet();
-      return true;
-    }
-    if (status === "failed") {
-      closeModal({ force: true });
-      openResultModal(
-        "Top up failed",
-        statusPayload?.message || "The transaction was not completed."
-      );
-      return true;
-    }
-    return false;
-  };
-
-  const pollStatusOnce = async () => {
-    if (!activeTopupId || isCheckingStatus) return;
-    isCheckingStatus = true;
-    try {
-      const statusPayload = await checkTopupStatus(activeTopupId);
-      if (statusPayload?.status === "pending") {
-        setTopupLoading(true, statusPayload?.message || "Transaction pending...");
-      } else if (handleTopupCompletion(statusPayload)) {
-        stopStatusPolling();
-      }
-    } catch (error) {
-      setTopupLoading(true, "Checking transaction status...");
-    } finally {
-      isCheckingStatus = false;
-    }
-  };
-
-  const startStatusPolling = () => {
-    stopStatusPolling();
-    pollStatusOnce();
-    statusTimer = setInterval(pollStatusOnce, 3000);
+  const showValidationResult = (transactionId, statusPayload) => {
+    const status = String(statusPayload?.status || "pending");
+    const message = statusPayload?.message || "Transaction status retrieved.";
+    const statusLabel = status.charAt(0).toUpperCase() + status.slice(1);
+    openResultModal(
+      `Validation result · ${statusLabel}`,
+      `Reference: ${transactionId}. ${message}`
+    );
   };
 
   const openModal = () => {
@@ -2663,8 +2652,6 @@ if (topupModal) {
       const rawPhone = String(currentUserProfile.phone || "").trim();
       phoneInput.value = rawPhone.startsWith("+") ? rawPhone.slice(1) : rawPhone;
     }
-    stopStatusPolling();
-    activeTopupId = null;
     setTopupLoading(false);
     updateSummary();
     amountInput.focus();
@@ -2690,6 +2677,27 @@ if (topupModal) {
 
   closeButtons.forEach((button) => {
     button.addEventListener("click", () => closeModal());
+  });
+
+  topupResultCloseButtons.forEach((button) => {
+    button.addEventListener("click", closeResultModal);
+  });
+
+  document.addEventListener("click", (event) => {
+    if (!event.target.closest("#topup-result-modal [data-close]")) return;
+    closeResultModal();
+  });
+
+  topupResultModal?.addEventListener("click", (event) => {
+    if (event.target.classList.contains("modal-backdrop")) {
+      closeResultModal();
+    }
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && topupResultModal?.classList.contains("active")) {
+      closeResultModal();
+    }
   });
 
   topupModal.addEventListener("click", (event) => {
@@ -2734,12 +2742,16 @@ if (topupModal) {
       phone: normalizedPhone,
     })
       .then((data) => {
-        activeTopupId = data.transaction_id;
-        if (!activeTopupId) {
+        if (!data.transaction_id) {
           throw new Error("Unable to start the payment. Please try again.");
         }
-        setTopupLoading(true, data.message || "Transaction pending...");
-        startStatusPolling();
+        closeModal({ force: true });
+        openResultModal(
+          "Top up initialized",
+          data.message ||
+            "Transaction is pending. Use Validate in the pending table to check status."
+        );
+        loadWallet();
       })
       .catch((error) => {
         setTopupLoading(false);
@@ -2752,6 +2764,32 @@ if (topupModal) {
           submitButton.textContent = "Top up";
         }
       });
+  });
+
+  walletPendingInitBodyEl?.addEventListener("click", async (event) => {
+    const button = event.target.closest("button[data-action='validate-pending']");
+    if (!button || button.disabled) return;
+
+    const initId = Number(button.dataset.id);
+    const transactionId = String(button.dataset.transactionId || "").trim();
+    if (!initId || !transactionId) return;
+
+    validatingPendingTransactions.add(initId);
+    button.disabled = true;
+    button.textContent = "Validating...";
+
+    try {
+      const statusPayload = await checkTopupStatus(transactionId);
+      showValidationResult(transactionId, statusPayload);
+    } catch (error) {
+      openResultModal(
+        "Validation failed",
+        error.message || "Unable to validate the transaction right now."
+      );
+    } finally {
+      validatingPendingTransactions.delete(initId);
+      loadWallet();
+    }
   });
 
   updateSummary();

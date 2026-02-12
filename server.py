@@ -29,6 +29,33 @@ MYSQL_HOST = "146.190.113.67"
 MYSQL_USER = "magnifique"
 MYSQL_PASSWORD = "msN7qyp9zbPn4g_LZ"
 MYSQL_DB = "faranga_float"
+MYSQL_CHARSET = "utf8mb4"
+MYSQL_COLLATION = "utf8mb4_unicode_ci"
+MYSQL_SSL_MODE = os.getenv("MYSQL_SSL_MODE", "DISABLED")
+MYSQL_CONNECT_TIMEOUT = int(os.getenv("MYSQL_CONNECT_TIMEOUT", "5"))
+DB_SCHEMA_VERSION = "2026-02-12-bk-trans-init"
+DB_INIT_MARKER = Path(os.getenv("DB_INIT_MARKER_PATH", f"/tmp/{MYSQL_DB}_db_schema_version"))
+REQUIRED_TABLES = (
+    "users",
+    "sessions",
+    "recipients",
+    "funds_recipients",
+    "airtime_schedules",
+    "as_recipients",
+    "funds_schedules",
+    "fs_recipients",
+    "transactions",
+    "topup_requests",
+    "bk_trans_init",
+    "wallet_balance",
+)
+REQUIRED_COLUMNS = (
+    ("airtime_schedules", "as_total_recipients"),
+    ("as_recipients", "recipient_id"),
+    ("transactions", "trans_ref_type"),
+    ("transactions", "platform_fee"),
+    ("bk_trans_init", "internal_transaction_ref_number"),
+)
 
 
 class MySQLError(Exception):
@@ -103,23 +130,34 @@ def _format_query(query: str, params: tuple | list | None) -> str:
 
 
 def _run_mysql(sql: str, *, use_db: bool = True, with_headers: bool = True) -> str:
+    session_sql = (
+        f"SET NAMES {MYSQL_CHARSET} COLLATE {MYSQL_COLLATION}; "
+        f"SET collation_connection = '{MYSQL_COLLATION}'; "
+        f"{sql}"
+    )
     cmd = [
         "mysql",
         "-h",
         MYSQL_HOST,
+        "--protocol=TCP",
+        f"--connect-timeout={MYSQL_CONNECT_TIMEOUT}",
         "-u",
         MYSQL_USER,
-        f"-p{MYSQL_PASSWORD}",
+        f"--default-character-set={MYSQL_CHARSET}",
         "--batch",
         "--raw",
     ]
+    if MYSQL_SSL_MODE:
+        cmd.append(f"--ssl-mode={MYSQL_SSL_MODE}")
     if not with_headers:
         cmd.append("--skip-column-names")
     if use_db:
         cmd.extend(["-D", MYSQL_DB])
-    cmd.extend(["-e", sql])
+    cmd.extend(["-e", session_sql])
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    env = os.environ.copy()
+    env["MYSQL_PWD"] = MYSQL_PASSWORD
+    result = subprocess.run(cmd, capture_output=True, text=True, env=env)
     if result.returncode != 0:
         error = (result.stderr or result.stdout).strip() or "MySQL command failed"
         raise MySQLError(error)
@@ -145,14 +183,14 @@ def _parse_rows(output: str) -> list[dict]:
     return rows
 
 
-def select_all(query: str, params: tuple | list | None = None) -> list[dict]:
+def select_all(query: str, params: tuple | list | None = None, *, use_db: bool = True) -> list[dict]:
     sql = _format_query(query, tuple(params) if params is not None else ())
-    output = _run_mysql(sql, use_db=True, with_headers=True)
+    output = _run_mysql(sql, use_db=use_db, with_headers=True)
     return _parse_rows(output)
 
 
-def select_one(query: str, params: tuple | list | None = None) -> dict | None:
-    rows = select_all(query, params)
+def select_one(query: str, params: tuple | list | None = None, *, use_db: bool = True) -> dict | None:
+    rows = select_all(query, params, use_db=use_db)
     return rows[0] if rows else None
 
 
@@ -170,11 +208,64 @@ def execute(query: str, params: tuple | list | None = None) -> tuple[int, int]:
     return row_count, last_id
 
 
+def _is_db_marker_current() -> bool:
+    try:
+        return DB_INIT_MARKER.read_text(encoding="utf-8").strip() == DB_SCHEMA_VERSION
+    except OSError:
+        return False
+
+
+def _write_db_marker() -> None:
+    try:
+        DB_INIT_MARKER.write_text(DB_SCHEMA_VERSION, encoding="utf-8")
+    except OSError:
+        return
+
+
+def _schema_is_ready() -> bool:
+    table_placeholders = ", ".join("?" for _ in REQUIRED_TABLES)
+    column_filters = " OR ".join("(table_name = ? AND column_name = ?)" for _ in REQUIRED_COLUMNS)
+    column_params: list[object] = [MYSQL_DB]
+    for table_name, column_name in REQUIRED_COLUMNS:
+        column_params.extend([table_name, column_name])
+
+    try:
+        table_row = select_one(
+            f"""
+            SELECT COUNT(DISTINCT TABLE_NAME) AS total
+            FROM information_schema.tables
+            WHERE table_schema = ? AND table_name IN ({table_placeholders})
+            """,
+            (MYSQL_DB, *REQUIRED_TABLES),
+            use_db=False,
+        )
+        if table_row is None or int(table_row.get("total") or 0) != len(REQUIRED_TABLES):
+            return False
+
+        column_row = select_one(
+            f"""
+            SELECT COUNT(*) AS total
+            FROM information_schema.columns
+            WHERE table_schema = ? AND ({column_filters})
+            """,
+            tuple(column_params),
+            use_db=False,
+        )
+        return column_row is not None and int(column_row.get("total") or 0) == len(REQUIRED_COLUMNS)
+    except MySQLError:
+        return False
+
+
 def init_db() -> None:
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    if _is_db_marker_current():
+        return
+    if _schema_is_ready():
+        _write_db_marker()
+        return
 
     _run_mysql(
-        f"CREATE DATABASE IF NOT EXISTS {MYSQL_DB} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci",
+        f"CREATE DATABASE IF NOT EXISTS {MYSQL_DB} CHARACTER SET {MYSQL_CHARSET} COLLATE {MYSQL_COLLATION}",
         use_db=False,
         with_headers=False,
     )
@@ -413,6 +504,33 @@ def init_db() -> None:
         """
     )
 
+    execute(
+        """
+        CREATE TABLE IF NOT EXISTS bk_trans_init (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            user_id INT NOT NULL,
+            internal_transaction_ref_number VARCHAR(64) NOT NULL,
+            transaction_id VARCHAR(64) NULL,
+            status VARCHAR(20) NOT NULL DEFAULT 'pending',
+            message TEXT NULL,
+            amount DECIMAL(14,2) NOT NULL,
+            platform_fee DECIMAL(14,2) NOT NULL DEFAULT 0.00,
+            total_charge DECIMAL(14,2) NOT NULL,
+            method VARCHAR(40) NOT NULL,
+            channel_name VARCHAR(40) NOT NULL,
+            phone_number VARCHAR(20) NOT NULL,
+            payer_code VARCHAR(64) NOT NULL,
+            payer_names VARCHAR(255) NOT NULL,
+            payer_email VARCHAR(255) NULL,
+            created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL,
+            UNIQUE KEY bk_trans_init_internal_ref_uidx (internal_transaction_ref_number),
+            INDEX bk_trans_init_user_status_idx (user_id, status),
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        ) ENGINE=InnoDB
+        """
+    )
+
     trans_ref_type_column = select_one(
         """
         SELECT COLUMN_NAME
@@ -508,6 +626,7 @@ def init_db() -> None:
     )
 
     execute("DELETE FROM sessions")
+    _write_db_marker()
 
 
 class AdminHandler(BaseHTTPRequestHandler):
@@ -824,7 +943,94 @@ class AdminHandler(BaseHTTPRequestHandler):
             row["id"] = int(row["id"])
             row["trans_amount"] = float(row["trans_amount"])
             row["platform_fee"] = float(row["platform_fee"])
-        return {"balance": money_to_float(balance), "transactions": tx_rows}
+        pending_rows = select_all(
+            """
+            SELECT
+              id,
+              internal_transaction_ref_number,
+              transaction_id,
+              status,
+              message,
+              amount,
+              platform_fee,
+              total_charge,
+              method,
+              phone_number,
+              created_at,
+              updated_at
+            FROM bk_trans_init
+            WHERE user_id = ? AND status = 'pending'
+            ORDER BY id DESC
+            LIMIT 100
+            """,
+            (user_id,),
+        )
+        for row in pending_rows:
+            row["id"] = int(row["id"])
+            row["amount"] = float(row["amount"])
+            row["platform_fee"] = float(row["platform_fee"])
+            row["total_charge"] = float(row["total_charge"])
+        return {
+            "balance": money_to_float(balance),
+            "transactions": tx_rows,
+            "pending_initializations": pending_rows,
+        }
+
+    def _update_bk_trans_status(self, user_id: int, transaction_id: str, status: str, message: str) -> None:
+        execute(
+            """
+            UPDATE bk_trans_init
+            SET status = ?, message = ?, updated_at = ?
+            WHERE user_id = ? AND internal_transaction_ref_number = ?
+            """,
+            (status, message, utc_now_str(), user_id, transaction_id),
+        )
+
+    def _update_topup_request_status(self, user_id: int, transaction_id: str, status: str) -> None:
+        execute(
+            """
+            UPDATE topup_requests
+            SET status = ?, updated_at = ?
+            WHERE user_id = ? AND transaction_id = ?
+            """,
+            (status, utc_now_str(), user_id, transaction_id),
+        )
+
+    def _derive_topup_status(self, gateway_response: dict) -> tuple[str, str]:
+        data_wrapper = gateway_response.get("data")
+        if not isinstance(data_wrapper, dict):
+            data_wrapper = {}
+        data_payload = data_wrapper.get("data")
+        if not isinstance(data_payload, dict):
+            data_payload = {}
+
+        raw_status = str(data_payload.get("status") or data_wrapper.get("status") or "").strip().lower()
+        gateway_message = str(
+            gateway_response.get("message")
+            or data_wrapper.get("message")
+            or data_payload.get("message")
+            or ""
+        ).strip()
+        gateway_message_lc = gateway_message.lower()
+
+        if raw_status:
+            if any(token in raw_status for token in ("fail", "declin", "error")):
+                return "failed", gateway_message or "Transaction Failed"
+            if any(token in raw_status for token in ("success", "complet")):
+                return "success", gateway_message or "Transaction Successful"
+            if any(token in raw_status for token in ("pending", "process", "initiat")):
+                return "pending", gateway_message or "Transaction Pending"
+
+        if "failed" in gateway_message_lc:
+            return "failed", gateway_message
+        if "successful" in gateway_message_lc or "success" in gateway_message_lc:
+            return "success", gateway_message
+        if "pending" in gateway_message_lc:
+            return "pending", gateway_message
+
+        if gateway_response.get("success"):
+            return "success", gateway_message or "Transaction Successful"
+        return "pending", gateway_message or "Transaction Pending"
 
     def _wallet_topup(self) -> None:
         user_id = self._require_user()
@@ -917,24 +1123,40 @@ class AdminHandler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             self._send_json(502, {"error": "Invalid response from payment gateway."})
             return
+        if not isinstance(gateway_response, dict):
+            self._send_json(502, {"error": "Unexpected response from payment gateway."})
+            return
+
+        gateway_data = gateway_response.get("data")
+        if not isinstance(gateway_data, dict):
+            gateway_data = {}
+        gateway_payload_data = gateway_data.get("data")
+        if not isinstance(gateway_payload_data, dict):
+            gateway_payload_data = {}
 
         if not gateway_response.get("success"):
             message = (
-                gateway_response.get("data", {}).get("message")
+                gateway_data.get("message")
                 or gateway_response.get("message")
                 or "Payment initiation failed."
             )
             self._send_json(400, {"error": message})
             return
 
-        internal_ref = (
-            gateway_response.get("data", {})
-            .get("data", {})
-            .get("internal_transaction_ref_number")
-        )
+        internal_ref = gateway_payload_data.get("internal_transaction_ref_number")
         if not internal_ref:
             self._send_json(502, {"error": "Payment gateway did not return a transaction reference."})
             return
+
+        gateway_transaction_id = gateway_payload_data.get("transaction_id")
+        if gateway_transaction_id is not None:
+            gateway_transaction_id = str(gateway_transaction_id).strip() or None
+
+        init_message = str(
+            gateway_data.get("message")
+            or gateway_response.get("message")
+            or "Transaction pending confirmation."
+        ).strip()
 
         now = utc_now_str()
         execute(
@@ -962,13 +1184,68 @@ class AdminHandler(BaseHTTPRequestHandler):
             ),
         )
 
-        message = gateway_response.get("data", {}).get("message") or "Transaction pending confirmation."
+        execute(
+            """
+            INSERT INTO bk_trans_init
+              (
+                user_id,
+                internal_transaction_ref_number,
+                transaction_id,
+                status,
+                message,
+                amount,
+                platform_fee,
+                total_charge,
+                method,
+                channel_name,
+                phone_number,
+                payer_code,
+                payer_names,
+                payer_email,
+                created_at,
+                updated_at
+              )
+            VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE
+              transaction_id = VALUES(transaction_id),
+              status = 'pending',
+              message = VALUES(message),
+              amount = VALUES(amount),
+              platform_fee = VALUES(platform_fee),
+              total_charge = VALUES(total_charge),
+              method = VALUES(method),
+              channel_name = VALUES(channel_name),
+              phone_number = VALUES(phone_number),
+              payer_code = VALUES(payer_code),
+              payer_names = VALUES(payer_names),
+              payer_email = VALUES(payer_email),
+              updated_at = VALUES(updated_at)
+            """,
+            (
+                user_id,
+                internal_ref,
+                gateway_transaction_id,
+                init_message,
+                amount,
+                platform_fee,
+                total_charge,
+                method,
+                channel_name,
+                phone,
+                str(user_id),
+                str(payer_name).strip(),
+                payer_email or None,
+                now,
+                now,
+            ),
+        )
+
         self._send_json(
             200,
             {
                 "status": "pending",
                 "transaction_id": internal_ref,
-                "message": message,
+                "message": init_message,
             },
         )
 
@@ -996,16 +1273,31 @@ class AdminHandler(BaseHTTPRequestHandler):
             """,
             (user_id, transaction_id),
         )
-        if request_row is None:
+        init_row = select_one(
+            """
+            SELECT id, amount, platform_fee, status, message
+            FROM bk_trans_init
+            WHERE user_id = ? AND internal_transaction_ref_number = ?
+            """,
+            (user_id, transaction_id),
+        )
+        if request_row is None and init_row is None:
             self._send_json(404, {"error": "Transaction not found."})
             return
 
-        status = str(request_row.get("status") or "pending").lower()
+        request_status = str((request_row or {}).get("status") or "pending").lower()
+        init_status = str((init_row or {}).get("status") or "pending").lower()
+        status = request_status
+        if status == "pending" and init_status in {"success", "failed"}:
+            status = init_status
         if status == "success":
+            self._update_bk_trans_status(user_id, transaction_id, "success", "Transaction Successful")
             self._send_json(200, {"status": "success", "message": "Transaction Successful"})
             return
         if status == "failed":
-            self._send_json(200, {"status": "failed", "message": "Transaction Failed"})
+            failed_message = str((init_row or {}).get("message") or "Transaction Failed").strip()
+            self._update_bk_trans_status(user_id, transaction_id, "failed", failed_message)
+            self._send_json(200, {"status": "failed", "message": failed_message})
             return
 
         try:
@@ -1039,11 +1331,13 @@ class AdminHandler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             self._send_json(502, {"error": "Invalid response from payment gateway."})
             return
+        if not isinstance(gateway_response, dict):
+            self._send_json(502, {"error": "Unexpected response from payment gateway."})
+            return
 
-        gateway_message = str(gateway_response.get("message") or "").strip()
-        gateway_success = bool(gateway_response.get("success"))
+        derived_status, derived_message = self._derive_topup_status(gateway_response)
 
-        if gateway_success or "Successful" in gateway_message:
+        if derived_status == "success":
             existing = select_one(
                 """
                 SELECT id FROM transactions
@@ -1052,8 +1346,15 @@ class AdminHandler(BaseHTTPRequestHandler):
                 (user_id, transaction_id),
             )
             if existing is None:
-                amount = Decimal(str(request_row.get("amount") or 0))
-                platform_fee = Decimal(str(request_row.get("platform_fee") or 0))
+                amount_raw = (request_row or {}).get("amount")
+                if amount_raw is None:
+                    amount_raw = (init_row or {}).get("amount")
+                fee_raw = (request_row or {}).get("platform_fee")
+                if fee_raw is None:
+                    fee_raw = (init_row or {}).get("platform_fee")
+
+                amount = Decimal(str(amount_raw or 0))
+                platform_fee = Decimal(str(fee_raw or 0))
                 self._create_transaction(
                     user_id=user_id,
                     trans_type="in",
@@ -1062,38 +1363,24 @@ class AdminHandler(BaseHTTPRequestHandler):
                     platform_fee=platform_fee,
                     trans_ref_type="top-up",
                 )
-            execute(
-                """
-                UPDATE topup_requests
-                SET status = 'success', updated_at = ?
-                WHERE id = ?
-                """,
-                (utc_now_str(), request_row["id"]),
-            )
-            self._send_json(200, {"status": "success", "message": gateway_message or "Transaction Successful"})
+            self._update_topup_request_status(user_id, transaction_id, "success")
+            self._update_bk_trans_status(user_id, transaction_id, "success", derived_message)
+            self._send_json(200, {"status": "success", "message": derived_message})
             return
 
-        if "Pending" in gateway_message:
-            self._send_json(200, {"status": "pending", "message": gateway_message or "Transaction Pending"})
+        if derived_status == "pending":
+            self._update_topup_request_status(user_id, transaction_id, "pending")
+            self._update_bk_trans_status(user_id, transaction_id, "pending", derived_message)
+            self._send_json(200, {"status": "pending", "message": derived_message})
             return
 
-        if "Failed" in gateway_message:
-            execute(
-                """
-                UPDATE topup_requests
-                SET status = 'failed', updated_at = ?
-                WHERE id = ?
-                """,
-                (utc_now_str(), request_row["id"]),
-            )
-            reason = str(gateway_response.get("reason") or "").strip()
-            message = gateway_message or "Transaction Failed"
-            if reason:
-                message = f"{message}. {reason}"
-            self._send_json(200, {"status": "failed", "message": message})
-            return
-
-        self._send_json(200, {"status": "pending", "message": gateway_message or "Transaction Pending"})
+        reason = str(gateway_response.get("reason") or "").strip()
+        failed_message = derived_message
+        if reason and reason not in failed_message:
+            failed_message = f"{failed_message}. {reason}"
+        self._update_topup_request_status(user_id, transaction_id, "failed")
+        self._update_bk_trans_status(user_id, transaction_id, "failed", failed_message)
+        self._send_json(200, {"status": "failed", "message": failed_message})
 
     def _get_wallet(self) -> None:
         user_id = self._require_user()
@@ -1263,7 +1550,8 @@ class AdminHandler(BaseHTTPRequestHandler):
             JOIN recipients r ON r.id = ar.recipient_id AND r.user_id = ar.user_id
             JOIN transactions t ON t.user_id = s.user_id
               AND t.trans_type = 'out'
-              AND t.trans_ref = CAST(s.id AS CHAR)
+              AND t.trans_ref_type = 'airtime'
+              AND CAST(t.trans_ref AS UNSIGNED) = s.id
             WHERE ar.user_id = ?
               AND s.approved = 1
               AND s.deleted_at IS NULL
@@ -1309,7 +1597,7 @@ class AdminHandler(BaseHTTPRequestHandler):
             JOIN transactions t ON t.user_id = s.user_id
               AND t.trans_type = 'out'
               AND t.trans_ref_type = 'funds'
-              AND t.trans_ref = CAST(s.id AS CHAR)
+              AND CAST(t.trans_ref AS UNSIGNED) = s.id
             WHERE fr.user_id = ?
               AND s.approved = 1
               AND s.deleted_at IS NULL
@@ -2925,8 +3213,8 @@ class AdminHandler(BaseHTTPRequestHandler):
 
 def main() -> None:
     init_db()
-    server = HTTPServer(("0.0.0.0", 8000), AdminHandler)
-    print("Serving on http://localhost:8000")
+    server = HTTPServer(("0.0.0.0", 8050), AdminHandler)
+    print("Serving on http://localhost:8050")
     server.serve_forever()
 
 

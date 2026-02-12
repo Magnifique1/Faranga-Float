@@ -100,6 +100,35 @@
               <div class="wallet-transactions">
                 <div class="table-header">
                   <div>
+                    <h3>Pending initialized transactions</h3>
+                    <p>Validate once payment has completed on the customer phone.</p>
+                  </div>
+                </div>
+                <div class="table-wrapper">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Reference</th>
+                        <th>Amount</th>
+                        <th>Fee</th>
+                        <th>Total Charge</th>
+                        <th>Method</th>
+                        <th>Phone</th>
+                        <th>Created</th>
+                        <th>Action</th>
+                      </tr>
+                    </thead>
+                    <tbody id="wallet-pending-init-body"></tbody>
+                  </table>
+                </div>
+                <div class="empty-state" id="wallet-pending-init-empty">
+                  No pending initialized transactions.
+                </div>
+              </div>
+
+              <div class="wallet-transactions">
+                <div class="table-header">
+                  <div>
                     <h3>Recent transactions</h3>
                     <p>Latest topups and schedule deductions.</p>
                   </div>
@@ -224,6 +253,6 @@
       </div>
     </div>
 
-    <script src="app.js"></script>
+    <script src="app.js?v=20260212-modalfix2"></script>
   </body>
 </html>

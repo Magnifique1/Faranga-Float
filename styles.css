@@ -324,7 +324,7 @@ body {
   color: #c9d5e8;
 }
 
-.sidebar-logout-button {
+.sidebar-footer button.sidebar-logout-button {
   margin-top: 12px;
   width: 100%;
   background: #d96a6a;
@@ -337,7 +337,7 @@ body {
   visibility: visible;
 }
 
-.sidebar-logout-button:hover {
+.sidebar-footer button.sidebar-logout-button:hover {
   background: #c85d5d;
 }
 
