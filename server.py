@@ -1407,13 +1407,33 @@ class AdminHandler(BaseHTTPRequestHandler):
             normalized = text.strip().lower()
             if not normalized:
                 return None
-            if any(token in normalized for token in ("fail", "declin", "error", "cancel", "reject", "revers")):
+            if any(
+                token in normalized
+                for token in ("fail", "declin", "error", "cancel", "reject", "revers", "invalid")
+            ):
                 return "failed"
             if any(token in normalized for token in ("pending", "process", "initiat", "await", "queue")):
                 return "pending"
-            if allow_success and any(token in normalized for token in ("success", "complet", "approved", "paid")):
+            if allow_success and (
+                any(token in normalized for token in ("success", "complet", "approved", "paid"))
+                or re.search(r"\bvalid(?:ated)?\b", normalized) is not None
+            ):
                 return "success"
             return None
+
+        def normalized_message(expected_status: str) -> str:
+            defaults = {
+                "success": "Transaction Successful",
+                "pending": "Transaction Pending",
+                "failed": "Transaction Failed",
+            }
+            text = gateway_message.strip()
+            if not text:
+                return defaults[expected_status]
+            text_status = infer_status(text, allow_success=True)
+            if text_status is not None and text_status != expected_status:
+                return defaults[expected_status]
+            return text
 
         inferred_explicit_statuses = [
             inferred
@@ -1421,19 +1441,19 @@ class AdminHandler(BaseHTTPRequestHandler):
             if inferred is not None
         ]
         if "failed" in inferred_explicit_statuses:
-            return "failed", gateway_message or "Transaction Failed"
+            return "failed", normalized_message("failed")
         if "pending" in inferred_explicit_statuses:
-            return "pending", gateway_message or "Transaction Pending"
+            return "pending", normalized_message("pending")
         if "success" in inferred_explicit_statuses:
-            return "success", gateway_message or "Transaction Successful"
+            return "success", normalized_message("success")
 
         # Message text is used only for failed/pending. We intentionally do not map generic
         # "successful" wrapper messages to transaction success.
         message_status = infer_status(gateway_message_lc, allow_success=False)
         if message_status == "failed":
-            return "failed", gateway_message or "Transaction Failed"
+            return "failed", normalized_message("failed")
         if message_status == "pending":
-            return "pending", gateway_message or "Transaction Pending"
+            return "pending", normalized_message("pending")
 
         # Some gateways expose an explicit transaction boolean inside the transaction payload.
         transaction_success_flag = self._bool_from_value(
@@ -1443,9 +1463,9 @@ class AdminHandler(BaseHTTPRequestHandler):
             )
         )
         if transaction_success_flag is True:
-            return "success", gateway_message or "Transaction Successful"
+            return "success", normalized_message("success")
         if transaction_success_flag is False:
-            return "failed", gateway_message or "Transaction Failed"
+            return "failed", normalized_message("failed")
 
         # Do not infer success from generic top-level envelope fields like success=true.
         scoped_success_values = self._collect_gateway_values(status_source, {"success", "is_success", "ok"})
@@ -1453,9 +1473,9 @@ class AdminHandler(BaseHTTPRequestHandler):
             parsed for parsed in (self._bool_from_value(value) for value in scoped_success_values) if parsed is not None
         ]
         if False in scoped_success_flags:
-            return "failed", gateway_message or "Transaction Failed"
+            return "failed", normalized_message("failed")
 
-        return "pending", gateway_message or "Transaction Pending"
+        return "pending", normalized_message("pending")
 
     def _safe_decimal(self, value: object) -> Decimal | None:
         if value is None:
