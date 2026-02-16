@@ -105,6 +105,29 @@ PUBLIC_STATIC_FILES = {
     "styles.css",
     "app.js",
 }
+CLEAN_PAGE_ROUTE_TO_FILE = {
+    "/": "index.html",
+    "/dashboard": "index.html",
+    "/login": "login.html",
+    "/signup": "signup.html",
+    "/wallet": "wallet.html",
+    "/settings": "settings.html",
+    "/airtime-recipients": "airtime-recipients.html",
+    "/airtime-schedules": "airtime-schedules.html",
+    "/funds-recipients": "funds-recipients.html",
+    "/funds-schedules": "funds-schedules.html",
+}
+LEGACY_HTML_ROUTE_TO_CLEAN = {
+    "/index.html": "/",
+    "/login.html": "/login",
+    "/signup.html": "/signup",
+    "/wallet.html": "/wallet",
+    "/settings.html": "/settings",
+    "/airtime-recipients.html": "/airtime-recipients",
+    "/airtime-schedules.html": "/airtime-schedules",
+    "/funds-recipients.html": "/funds-recipients",
+    "/funds-schedules.html": "/funds-schedules",
+}
 REQUIRED_TABLES = (
     "users",
     "sessions",
@@ -4451,14 +4474,14 @@ class AdminHandler(BaseHTTPRequestHandler):
 
         if len(password) < PASSWORD_MIN_LENGTH:
             self._redirect(
-                f"signup.html?error=Password%20must%20be%20at%20least%20{PASSWORD_MIN_LENGTH}%20characters"
+                f"/signup?error=Password%20must%20be%20at%20least%20{PASSWORD_MIN_LENGTH}%20characters"
             )
             return
         if password != confirm_password:
-            self._redirect("signup.html?error=Passwords%20do%20not%20match")
+            self._redirect("/signup?error=Passwords%20do%20not%20match")
             return
         if account_type not in {"individual", "business"}:
-            self._redirect("signup.html?error=Select%20an%20account%20type")
+            self._redirect("/signup?error=Select%20an%20account%20type")
             return
 
         now = utc_now_str()
@@ -4469,16 +4492,16 @@ class AdminHandler(BaseHTTPRequestHandler):
             national_file = files.get("national_id")
 
             if not name or not email or not phone or national_file is None:
-                self._redirect("signup.html?error=Missing%20required%20fields")
+                self._redirect("/signup?error=Missing%20required%20fields")
                 return
             if not PHONE_REGEX.match(phone):
-                self._redirect("signup.html?error=Invalid%20phone%20format")
+                self._redirect("/signup?error=Invalid%20phone%20format")
                 return
 
             try:
                 national_id_path = self._save_upload(national_file)
             except ValueError as error:
-                self._redirect(f"signup.html?error={quote(str(error))}")
+                self._redirect(f"/signup?error={quote(str(error))}")
                 return
             business_name = None
             business_email = None
@@ -4491,13 +4514,13 @@ class AdminHandler(BaseHTTPRequestHandler):
             business_file = files.get("business_registration")
 
             if not business_name or not business_email or not business_reg_no or business_file is None:
-                self._redirect("signup.html?error=Missing%20required%20fields")
+                self._redirect("/signup?error=Missing%20required%20fields")
                 return
 
             try:
                 business_reg_path = self._save_upload(business_file)
             except ValueError as error:
-                self._redirect(f"signup.html?error={quote(str(error))}")
+                self._redirect(f"/signup?error={quote(str(error))}")
                 return
             name = None
             email = business_email
@@ -4533,14 +4556,14 @@ class AdminHandler(BaseHTTPRequestHandler):
             )
         except MySQLError as error:
             if "Duplicate entry" in str(error):
-                self._redirect("signup.html?error=Email%20already%20exists")
+                self._redirect("/signup?error=Email%20already%20exists")
                 return
-            self._redirect("signup.html?error=Unable%20to%20create%20account")
+            self._redirect("/signup?error=Unable%20to%20create%20account")
             return
 
         session_id = self._create_session(user_id)
         self._redirect(
-            "index.html",
+            "/",
             headers={
                 "Set-Cookie": self._build_session_cookie(session_id)
             },
@@ -4552,13 +4575,13 @@ class AdminHandler(BaseHTTPRequestHandler):
         password = fields.get("password") or ""
 
         if not email or not password:
-            self._redirect("login.html?error=Missing%20credentials")
+            self._redirect("/login?error=Missing%20credentials")
             return
         rate_limit_key = self._login_rate_limit_key(email)
         block_remaining_seconds = self._login_block_remaining_seconds(rate_limit_key)
         if block_remaining_seconds > 0:
             self._redirect(
-                f"login.html?error=Too%20many%20attempts.%20Try%20again%20in%20{block_remaining_seconds}%20seconds"
+                f"/login?error=Too%20many%20attempts.%20Try%20again%20in%20{block_remaining_seconds}%20seconds"
             )
             return
 
@@ -4570,13 +4593,13 @@ class AdminHandler(BaseHTTPRequestHandler):
             password, user["password_hash"], user["password_salt"]
         ):
             self._register_login_failure(rate_limit_key)
-            self._redirect("login.html?error=Invalid%20credentials")
+            self._redirect("/login?error=Invalid%20credentials")
             return
 
         self._clear_login_failures(rate_limit_key)
         session_id = self._create_session(int(user["id"]))
         self._redirect(
-            "index.html",
+            "/",
             headers={
                 "Set-Cookie": self._build_session_cookie(session_id)
             },
@@ -4745,36 +4768,50 @@ class AdminHandler(BaseHTTPRequestHandler):
             return True
 
     def _serve_static(self) -> None:
-        path = unquote(self.path.split("?")[0])
-        if path == "/":
-            path = "/index.html"
+        raw_path, _, query = self.path.partition("?")
+        path = unquote(raw_path) or "/"
+        if not path.startswith("/"):
+            path = f"/{path}"
 
-        public_pages = {"/login.html", "/signup.html"}
-        protected_pages = {
-            "/index.html",
-            "/airtime-schedules.html",
-            "/airtime-recipients.html",
-            "/funds-schedules.html",
-            "/funds-recipients.html",
-            "/wallet.html",
-            "/settings.html",
-        }
+        if path != "/" and path.endswith("/"):
+            normalized_path = path.rstrip("/") or "/"
+            location = normalized_path if not query else f"{normalized_path}?{query}"
+            self._redirect(location)
+            return
+
+        legacy_target = LEGACY_HTML_ROUTE_TO_CLEAN.get(path)
+        if legacy_target is not None:
+            location = legacy_target if not query else f"{legacy_target}?{query}"
+            self._redirect(location)
+            return
+
+        if path == "/index":
+            location = "/" if not query else f"/?{query}"
+            self._redirect(location)
+            return
+
+        public_pages = {"/login", "/signup"}
+        protected_pages = set(CLEAN_PAGE_ROUTE_TO_FILE.keys()) - public_pages
 
         is_logged_in = self._get_session_user(touch=False) is not None
 
         if path in public_pages and is_logged_in:
-            self._redirect("index.html")
+            self._redirect("/")
             return
 
         if path in protected_pages and not is_logged_in:
-            self._redirect("login.html")
+            self._redirect("/login")
             return
 
         if path.startswith("/data/") or path.endswith(".sqlite") or path.endswith("server.py"):
             self._send_text(404, "Not found", "text/plain; charset=utf-8")
             return
 
-        requested = (ROOT / path.lstrip("/")).resolve()
+        mapped_file = CLEAN_PAGE_ROUTE_TO_FILE.get(path)
+        if mapped_file is not None:
+            requested = (ROOT / mapped_file).resolve()
+        else:
+            requested = (ROOT / path.lstrip("/")).resolve()
         if not str(requested).startswith(str(ROOT)):
             self._send_text(404, "Not found", "text/plain; charset=utf-8")
             return
@@ -4825,17 +4862,17 @@ class AdminHandler(BaseHTTPRequestHandler):
             try:
                 self._handle_signup()
             except RequestTooLargeError:
-                self._redirect("signup.html?error=Request%20body%20too%20large")
+                self._redirect("/signup?error=Request%20body%20too%20large")
             except MySQLError as error:
-                self._redirect(f"signup.html?error={str(error)}")
+                self._redirect(f"/signup?error={str(error)}")
             return
         if self.path == "/login":
             try:
                 self._handle_login()
             except RequestTooLargeError:
-                self._redirect("login.html?error=Request%20body%20too%20large")
+                self._redirect("/login?error=Request%20body%20too%20large")
             except MySQLError as error:
-                self._redirect(f"login.html?error={str(error)}")
+                self._redirect(f"/login?error={str(error)}")
             return
         if self.path == "/logout":
             self._handle_logout()

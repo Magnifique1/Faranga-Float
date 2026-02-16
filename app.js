@@ -17,7 +17,7 @@ async function parseApiResponse(response, fallbackMessage) {
     return response.json();
   }
   if (response.status === 401) {
-    window.location.href = "login.html";
+    window.location.href = "/login";
     throw new Error("Unauthorized");
   }
   let message = fallbackMessage;
@@ -3217,7 +3217,7 @@ if (protectedPage) {
       credentials: "same-origin",
       keepalive: true,
     }).finally(() => {
-      window.location.href = "login.html";
+      window.location.href = "/login";
     });
   };
 
